@@ -1,57 +1,50 @@
 package connector
 
 import (
+	"context"
 	"database/sql"
-	"fmt"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"time"
+
+	"github.com/Konsultn-Engineering/enorm/dialect"
 )
 
-// TODO: Add file for each connector type (Postgres, MySQL, SQLite) to keep this file clean
-type DBType string
-
-const (
-	Postgres DBType = "postgres"
-	MySQL    DBType = "mysql"
-	SQLite   DBType = "sqlite"
-)
-
-type ConnectionParams struct {
-	Type     DBType
-	Host     string
-	Port     int
-	User     string
-	Password string
-	DBName   string
-	SSLMode  string
+type Provider interface {
+	Connect(ctx context.Context, config Config) (Connection, error)
+	Dialect() dialect.Dialect
+	HealthCheck(ctx context.Context, conn Connection) error
 }
 
-func (p ConnectionParams) DriverAndDSN() (driver string, dsn string, err error) {
-	switch p.Type {
-	case Postgres:
-		ssl := p.SSLMode
-		if ssl == "" {
-			ssl = "disable"
-		}
-		return "pgx", fmt.Sprintf(
-			"postgres://%s:%s@%s:%d/%s?sslmode=%s",
-			p.User, p.Password, p.Host, p.Port, p.DBName, ssl,
-		), nil
-	case MySQL:
-		return "mysql", fmt.Sprintf(
-			"%s:%s@tcp(%s:%d)/%s",
-			p.User, p.Password, p.Host, p.Port, p.DBName,
-		), nil
-	case SQLite:
-		return "sqlite3", p.DBName, nil
-	default:
-		return "", "", fmt.Errorf("unsupported db type: %s", p.Type)
-	}
+type Connection interface {
+	DB() *sql.DB
+	Dialect() dialect.Dialect
+	Health(ctx context.Context) error
+	Stats() ConnectionStats
+	Close() error
 }
 
-func Connect(p *ConnectionParams) (*sql.DB, error) {
-	driver, dsn, err := p.DriverAndDSN()
-	if err != nil {
-		return nil, err
-	}
-	return sql.Open(driver, dsn)
+type Config struct {
+	Host           string            `json:"host" yaml:"host"`
+	Port           int               `json:"port" yaml:"port"`
+	Database       string            `json:"database" yaml:"database"`
+	Username       string            `json:"username" yaml:"username"`
+	Password       string            `json:"password" yaml:"password"`
+	SSLMode        string            `json:"ssl_mode" yaml:"ssl_mode"`
+	Params         map[string]string `json:"params" yaml:"params"`
+	Pool           PoolConfig        `json:"pool" yaml:"pool"`
+	ConnectTimeout time.Duration     `json:"connect_timeout" yaml:"connect_timeout"`
+	QueryTimeout   time.Duration     `json:"query_timeout" yaml:"query_timeout"`
+}
+
+type PoolConfig struct {
+	MaxOpen         int           `json:"max_open" yaml:"max_open"`
+	MaxIdle         int           `json:"max_idle" yaml:"max_idle"`
+	MaxLifetime     time.Duration `json:"max_lifetime" yaml:"max_lifetime"`
+	MaxIdleTime     time.Duration `json:"max_idle_time" yaml:"max_idle_time"`
+	HealthCheckFreq time.Duration `json:"health_check_freq" yaml:"health_check_freq"`
+}
+
+type Connector interface {
+	Connect(ctx context.Context) (Connection, error)
+	ConnectWithRetry(ctx context.Context, opts RetryOptions) (Connection, error)
+	Close() error
 }

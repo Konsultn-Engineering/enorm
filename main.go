@@ -1,21 +1,168 @@
 package main
 
 import (
-  "fmt"
+	"context"
+	"fmt"
+	"github.com/Konsultn-Engineering/enorm/ast"
+	"github.com/Konsultn-Engineering/enorm/cache"
+	"github.com/Konsultn-Engineering/enorm/connector"
+	"github.com/Konsultn-Engineering/enorm/dialect"
+	"github.com/Konsultn-Engineering/enorm/engine"
+	_ "github.com/Konsultn-Engineering/enorm/providers/postgres"
+	"github.com/Konsultn-Engineering/enorm/schema"
+	"github.com/Konsultn-Engineering/enorm/visitor"
+	"log"
+	"reflect"
+	"time"
 )
 
-//TIP <p>To run your code, right-click the code and select <b>Run</b>.</p> <p>Alternatively, click
-// the <icon src="AllIcons.Actions.Execute"/> icon in the gutter and select the <b>Run</b> menu item from here.</p>
+type User struct {
+	ID        uint64
+	FirstName string
+	Email     string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+func test() {
+	selectStmt := ast.SelectStmt{
+		Columns: []ast.Node{
+			&ast.Column{Name: "id"},
+			&ast.Column{Name: "name"},
+		},
+		From: &ast.Table{Name: "users"},
+		Where: &ast.WhereClause{
+			Condition: &ast.BinaryExpr{
+				Operator: "OR",
+				Left: &ast.BinaryExpr{
+					Operator: "AND",
+					Left: &ast.BinaryExpr{
+						Operator: "AND",
+						Left: &ast.BinaryExpr{
+							Left:     &ast.Column{Name: "a"},
+							Operator: "=",
+							Right:    &ast.Value{Val: 1, ValueType: ast.ValueInt},
+						},
+						Right: &ast.BinaryExpr{
+							Left:     &ast.Column{Name: "b"},
+							Operator: "=",
+							Right:    &ast.Value{Val: 2, ValueType: ast.ValueInt},
+						},
+					},
+					Right: &ast.BinaryExpr{
+						Left:     &ast.Column{Name: "c"},
+						Operator: "=",
+						Right:    &ast.Value{Val: 3, ValueType: ast.ValueInt},
+					},
+				},
+				Right: &ast.BinaryExpr{
+					Left:     &ast.Column{Name: "d"},
+					Operator: "=",
+					Right:    &ast.Value{Val: "x", ValueType: ast.ValueString},
+				},
+			},
+		},
+	}
+	//selectStmt := ast.SelectStmt{
+	//	Columns: []ast.Node{
+	//		&ast.Column{Name: "id"},
+	//		&ast.Column{Name: "name"},
+	//	},
+	//	From: &ast.Table{Name: "users"},
+	//	Where: &ast.WhereClause{
+	//		Condition: &ast.BinaryExpr{
+	//			Left:     &ast.Column{Name: "id"},
+	//			Operator: "IN",
+	//			Right: &ast.SubqueryExpr{
+	//				Stmt: &ast.SelectStmt{
+	//					Columns: []ast.Node{
+	//						&ast.Column{Name: "user_id"},
+	//					},
+	//					From: &ast.Table{Name: "posts"},
+	//					Where: &ast.WhereClause{
+	//						Condition: &ast.BinaryExpr{
+	//							Left:     &ast.Column{Name: "published"},
+	//							Operator: "=",
+	//							Right:    &ast.Value{Val: true, ValueType: ast.ValueBool},
+	//						},
+	//					},
+	//				},
+	//			},
+	//		},
+	//	},
+	//	GroupBy: &ast.GroupByClause{
+	//		Exprs: []ast.Node{
+	//			&ast.Column{Name: "id"},
+	//			&ast.Column{Name: "name"},
+	//		},
+	//	},
+	//}
+
+	c := cache.NewQueryCache() // your real cache instance
+	d := dialect.NewTiDBDialect()
+	v := visitor.NewSQLVisitor(d, c)
+
+	fp := selectStmt.Fingerprint()
+
+	// First access: should MISS
+	if cached, ok := c.GetSQL(fp); ok {
+		log.Println("CACHE HIT:", cached.SQL)
+	} else {
+		sql, args, err := v.Build(&selectStmt)
+		if err != nil {
+			log.Fatal(err)
+		}
+		c.SetSQL(fp, &cache.CachedQuery{SQL: sql})
+		log.Println("CACHE MISS -> COMPUTED:", sql)
+		log.Println("ARGS:", args)
+	}
+
+	// Second access: should HIT
+	if cached, ok := c.GetSQL(fp); ok {
+		log.Println("RECONFIRM HIT:", cached.SQL, cached.ArgsOrder)
+	} else {
+		log.Println("UNEXPECTED MISS")
+	}
+
+}
 
 func main() {
-  //TIP <p>Press <shortcut actionId="ShowIntentionActions"/> when your caret is at the underlined text
-  // to see how GoLand suggests fixing the warning.</p><p>Alternatively, if available, click the lightbulb to view possible fixes.</p>
-  s := "gopher"
-  fmt.Println("Hello and welcome, %s!", s)
+	db, err := connector.New("postgres", connector.Config{
+		Host:     "localhost",
+		Port:     5432,
+		Database: "enorm_test",
+		Username: "postgres",
+		Password: "admin",
+		SSLMode:  "disable",
+	})
 
-  for i := 1; i <= 5; i++ {
-	//TIP <p>To start your debugging session, right-click your code in the editor and select the Debug option.</p> <p>We have set one <icon src="AllIcons.Debugger.Db_set_breakpoint"/> breakpoint
-	// for you, but you can always add more by pressing <shortcut actionId="ToggleLineBreakpoint"/>.</p>
-	fmt.Println("i =", 100/i)
-  }
+	if err != nil {
+		panic(fmt.Sprintf("Failed to connect to database: %v", err))
+	}
+
+	eng, err := db.Connect(context.Background())
+
+	if err != nil {
+		panic(fmt.Sprintf("Failed to connect: %v", err))
+	}
+
+	_ = engine.New(eng.DB())
+
+	//schema.RegisterScanner(User{}, schema.DefaultScanner[User])
+
+	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldRegistry) error {
+		u := a.(*User)
+		return scanner.Bind(&u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt)
+	})
+
+	//var u User
+	//if err := e.FindOne(&u); err != nil {
+	//	panic(err)
+	//}
+	//fmt.Println("User:", u.FirstName)
+
+	meta, _ := schema.Introspect(reflect.TypeOf(User{}))
+	columns := []string{"id", "first_name", "email", "missing_column"}
+	fmt.Println(schema.DebugBindings(meta, columns))
+
 }
