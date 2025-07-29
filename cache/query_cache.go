@@ -6,6 +6,7 @@ import (
 
 type CachedQuery struct {
 	SQL       string
+	Args      []any
 	ArgsOrder []string
 	StmtKey   string
 	ScannerID string
