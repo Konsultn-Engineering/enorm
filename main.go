@@ -12,7 +12,6 @@ import (
 	"github.com/Konsultn-Engineering/enorm/schema"
 	"github.com/Konsultn-Engineering/enorm/visitor"
 	"log"
-	"reflect"
 	"time"
 )
 
@@ -146,23 +145,14 @@ func main() {
 		panic(fmt.Sprintf("Failed to connect: %v", err))
 	}
 
-	_ = engine.New(eng.DB())
-
-	//schema.RegisterScanner(User{}, schema.DefaultScanner[User])
+	e := engine.New(eng.DB())
 
 	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldRegistry) error {
 		u := a.(*User)
-		return scanner.Bind(&u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt)
+		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt)
 	})
 
-	//var u User
-	//if err := e.FindOne(&u); err != nil {
-	//	panic(err)
-	//}
-	//fmt.Println("User:", u.FirstName)
-
-	meta, _ := schema.Introspect(reflect.TypeOf(User{}))
-	columns := []string{"id", "first_name", "email", "missing_column"}
-	fmt.Println(schema.DebugBindings(meta, columns))
-
+	user := &User{}
+	fmt.Println(e.FindOne(user))
+	fmt.Println(user)
 }

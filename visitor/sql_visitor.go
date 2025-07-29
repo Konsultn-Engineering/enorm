@@ -55,6 +55,21 @@ func (v *SQLVisitor) Arg(a any) {
 }
 
 func (v *SQLVisitor) VisitSelect(s *ast.SelectStmt) error {
+	//	SELECT
+	//	[DISTINCT] column_list
+	//	FROM
+	//	table_name
+	//[JOIN ...]
+	//	[WHERE condition]
+	//	[GROUP BY column_list]
+	//	[HAVING condition]
+	//	[WINDOW ...]
+	//	[ORDER BY column_list]
+	//	[LIMIT count]
+	//	[OFFSET count]
+	//	[FETCH FIRST ... ROWS ONLY]
+	//	[FOR UPDATE | FOR SHARE]
+
 	v.sb.WriteString("SELECT ")
 
 	for i, col := range s.Columns {
@@ -89,6 +104,12 @@ func (v *SQLVisitor) VisitSelect(s *ast.SelectStmt) error {
 			v.sb.WriteString(", ")
 		}
 		if err := ord.Accept(v); err != nil {
+			return err
+		}
+	}
+
+	if s.Limit != nil {
+		if err := s.Limit.Accept(v); err != nil {
 			return err
 		}
 	}

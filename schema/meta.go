@@ -5,42 +5,10 @@ import (
 	"reflect"
 )
 
-// EntityMeta holds introspected metadata about a struct.
-type EntityMeta struct {
-	Type         reflect.Type
-	Name         string
-	Plural       string
-	Fields       []*FieldMeta
-	FieldMap     map[string]*FieldMeta
-	SnakeMap     map[string]*FieldMeta
-	ScannerFn    ScannerFunc
-	AliasMapping map[string]string
-}
-
-// FieldMeta holds metadata about a struct field.
-type FieldMeta struct {
-	GoName     string
-	DBName     string
-	Type       reflect.Type
-	Index      []int // for FieldByIndex
-	Tag        reflect.StructTag
-	IsExported bool
-}
-
-// ScannerFunc abstracts a scanner hook (if implemented).
-type ScannerFunc func(any, RowScanner) error
-
-// RowScanner = like sql.Rows or pgx.Row
-type RowScanner interface {
-	Scan(dest ...any) error
-	Columns() ([]string, error)
-}
-
 func buildMeta(t reflect.Type) (*EntityMeta, error) {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
-
 	if t.Kind() != reflect.Struct {
 		return nil, fmt.Errorf("invalid model type: %s", t.Kind())
 	}
@@ -55,15 +23,17 @@ func buildMeta(t reflect.Type) (*EntityMeta, error) {
 		AliasMapping: map[string]string{},
 	}
 
+	if tn, ok := reflect.New(t).Interface().(TableNamer); ok {
+		meta.Plural = tn.TableName()
+	}
+
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
 		if !f.IsExported() || f.Anonymous {
 			continue
 		}
-
 		name := f.Name
 		dbName := formatName(name)
-
 		fm := &FieldMeta{
 			GoName:     name,
 			DBName:     dbName,
@@ -71,6 +41,29 @@ func buildMeta(t reflect.Type) (*EntityMeta, error) {
 			Index:      f.Index,
 			Tag:        f.Tag,
 			IsExported: true,
+		}
+
+		fm.SetFunc = func(model any, val any) {
+			field := reflect.ValueOf(model).Elem().FieldByIndex(f.Index)
+			v := reflect.ValueOf(val)
+			if v.Type().ConvertibleTo(field.Type()) {
+				field.Set(v.Convert(field.Type()))
+			} else {
+				panic(fmt.Sprintf("cannot assign %s to field %s (%s)", v.Type(), f.Name, field.Type()))
+			}
+		}
+
+		idx := f.Index
+		targetType := f.Type
+
+		fm.SetFast = func(ptr any, raw any) {
+			dst := reflect.ValueOf(ptr).Elem().FieldByIndex(idx)
+			src := reflect.ValueOf(raw)
+			if src.Type().ConvertibleTo(targetType) {
+				dst.Set(src.Convert(targetType))
+			} else {
+				panic(fmt.Sprintf("type mismatch for field %s", f.Name))
+			}
 		}
 
 		meta.Fields = append(meta.Fields, fm)

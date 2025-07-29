@@ -1,9 +1,7 @@
 package schema
 
 import (
-	"fmt"
 	"reflect"
-	"strings"
 	"sync"
 )
 
@@ -19,10 +17,7 @@ func RegisterScanner[T any](model T, fn func(any, FieldRegistry) error) {
 
 func wrapScanner(fn func(any, FieldRegistry) error) ScannerFunc {
 	return func(target any, row RowScanner) error {
-		fr := &fieldRegistry{
-			entity: target,
-			binds:  map[string]func(model any, val any){},
-		}
+		fr := newRegistry(target)
 		if err := fn(target, fr); err != nil {
 			return err
 		}
@@ -32,13 +27,38 @@ func wrapScanner(fn func(any, FieldRegistry) error) ScannerFunc {
 			return err
 		}
 
+		type colBind struct {
+			index int
+			bind  func(any, any)
+		}
+
+		var colBinds []colBind
+		for i, col := range columns {
+			if bind, ok := fr.binds[col]; ok {
+				colBinds = append(colBinds, colBind{index: i, bind: bind})
+			}
+		}
+
+		typ := reflect.TypeOf(target)
+		if typ.Kind() == reflect.Ptr {
+			typ = typ.Elem()
+		}
+
+		meta, err := Introspect(typ)
+		if err != nil {
+			return err
+		}
+
 		dests := make([]any, len(columns))
-		values := make([]any, len(columns))
 		for i, col := range columns {
 			if _, ok := fr.binds[col]; ok {
-				var val any
-				values[i] = &val
-				dests[i] = &val
+				if fm, ok := meta.SnakeMap[col]; ok {
+					valPtr := getValuePtr(fm.Type)
+					dests[i] = valPtr
+				} else {
+					var fallback any
+					dests[i] = &fallback
+				}
 			} else {
 				var dummy any
 				dests[i] = &dummy
@@ -49,9 +69,13 @@ func wrapScanner(fn func(any, FieldRegistry) error) ScannerFunc {
 			return err
 		}
 
-		for i, col := range columns {
-			if bind, ok := fr.binds[col]; ok {
-				bind(target, reflect.Indirect(reflect.ValueOf(dests[i])).Interface())
+		for _, cb := range colBinds {
+			val := reflect.Indirect(reflect.ValueOf(dests[cb.index])).Interface()
+			cb.bind(target, val)
+
+			// Return to pool
+			if fm, ok := meta.SnakeMap[columns[cb.index]]; ok {
+				putValuePtr(fm.Type, dests[cb.index])
 			}
 		}
 
@@ -64,18 +88,4 @@ func getRegisteredScanner(t reflect.Type) ScannerFunc {
 		return v.(ScannerFunc)
 	}
 	return nil
-}
-
-func DebugBindings(meta *EntityMeta, columns []string) string {
-	var b strings.Builder
-	b.WriteString("Bindings:\n")
-	for i, col := range columns {
-		field, ok := meta.SnakeMap[col]
-		if ok {
-			fmt.Fprintf(&b, "  %2d. %-16s → %-16s (%s)\n", i+1, col, field.GoName, field.Type.Name())
-		} else {
-			fmt.Fprintf(&b, "  %2d. %-16s → [unbound]\n", i+1, col)
-		}
-	}
-	return b.String()
 }

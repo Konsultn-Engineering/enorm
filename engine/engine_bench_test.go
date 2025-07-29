@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"github.com/Konsultn-Engineering/enorm/schema"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"testing"
 	"time"
@@ -47,19 +48,20 @@ func init() {
 
 func BenchmarkFindOne(b *testing.B) {
 	b.ResetTimer()
-	//schema.RegisterScanner(User{}, func(a any, scanner schema.FieldRegistry) error {
-	//	u := a.(*User)
-	//	return scanner.Bind(&u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt)
-	//})
+	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldRegistry) error {
+		u := a.(*User)
+		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt)
+	})
 
-	context := context.Background()
+	//context := context.Background()
 
-	var u User
+	u := User{}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = e.FindOne(context, &u) // SELECT * FROM users LIMIT 1
+		_, _ = e.FindOne(&u) // SELECT * FROM users LIMIT 1
 	}
 
+	b.ReportAllocs()
 }
 
 func BenchmarkPGXRawScan(b *testing.B) {
