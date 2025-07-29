@@ -3,7 +3,75 @@ package schema
 import (
 	"fmt"
 	"reflect"
+	"time"
+	"unsafe"
 )
+
+// Pre-compiled setter functions to avoid closure allocations
+func createSetFunc(index []int, fieldType reflect.Type, fieldName string) func(model any, val any) {
+	return func(model any, val any) {
+		field := reflect.ValueOf(model).Elem().FieldByIndex(index)
+		v := reflect.ValueOf(val)
+		if v.Type().ConvertibleTo(fieldType) {
+			field.Set(v.Convert(fieldType))
+		} else {
+			panic("type mismatch")
+		}
+	}
+}
+
+func createSetFastFunc(index []int, fieldType reflect.Type, fieldName string) func(ptr any, raw any) {
+	return func(ptr any, raw any) {
+		dst := reflect.ValueOf(ptr).Elem().FieldByIndex(index)
+		src := reflect.ValueOf(raw)
+		if src.Type().ConvertibleTo(fieldType) {
+			dst.Set(src.Convert(fieldType))
+		} else {
+			panic("type mismatch")
+		}
+	}
+}
+
+// Direct field setter using unsafe pointers for maximum performance
+func createDirectSetterFunc(offset uintptr, fieldType reflect.Type) func(structPtr unsafe.Pointer, valPtr any) {
+	return func(structPtr unsafe.Pointer, valPtr any) {
+		fieldPtr := unsafe.Add(structPtr, offset)
+		
+		// Extract value from pointer without reflection for common types
+		switch fieldType.Kind() {
+		case reflect.Uint64:
+			if pv, ok := valPtr.(*uint64); ok {
+				*(*uint64)(fieldPtr) = *pv
+				return
+			}
+		case reflect.String:
+			if pv, ok := valPtr.(*string); ok {
+				*(*string)(fieldPtr) = *pv
+				return
+			}
+		case reflect.Int64:
+			if pv, ok := valPtr.(*int64); ok {
+				*(*int64)(fieldPtr) = *pv
+				return
+			}
+		case reflect.Struct:
+			// Handle time.Time specifically
+			if fieldType.String() == "time.Time" {
+				if pv, ok := valPtr.(*time.Time); ok {
+					*(*time.Time)(fieldPtr) = *pv
+					return
+				}
+			}
+		}
+		
+		// Fallback to reflection for complex types (should be rare)
+		field := reflect.NewAt(fieldType, fieldPtr).Elem()
+		v := reflect.ValueOf(valPtr).Elem()
+		if v.Type().ConvertibleTo(fieldType) {
+			field.Set(v.Convert(fieldType))
+		}
+	}
+}
 
 func buildMeta(t reflect.Type) (*EntityMeta, error) {
 	if t.Kind() == reflect.Ptr {
@@ -41,30 +109,13 @@ func buildMeta(t reflect.Type) (*EntityMeta, error) {
 			Index:      f.Index,
 			Tag:        f.Tag,
 			IsExported: true,
+			Offset:     f.Offset,
 		}
 
-		fm.SetFunc = func(model any, val any) {
-			field := reflect.ValueOf(model).Elem().FieldByIndex(f.Index)
-			v := reflect.ValueOf(val)
-			if v.Type().ConvertibleTo(field.Type()) {
-				field.Set(v.Convert(field.Type()))
-			} else {
-				panic(fmt.Sprintf("cannot assign %s to field %s (%s)", v.Type(), f.Name, field.Type()))
-			}
-		}
-
-		idx := f.Index
-		targetType := f.Type
-
-		fm.SetFast = func(ptr any, raw any) {
-			dst := reflect.ValueOf(ptr).Elem().FieldByIndex(idx)
-			src := reflect.ValueOf(raw)
-			if src.Type().ConvertibleTo(targetType) {
-				dst.Set(src.Convert(targetType))
-			} else {
-				panic(fmt.Sprintf("type mismatch for field %s", f.Name))
-			}
-		}
+		// Pre-compile setter functions to avoid closure allocations
+		fm.SetFunc = createSetFunc(f.Index, f.Type, f.Name)
+		fm.SetFast = createSetFastFunc(f.Index, f.Type, f.Name)
+		fm.DirectSet = createDirectSetterFunc(f.Offset, f.Type)
 
 		meta.Fields = append(meta.Fields, fm)
 		meta.FieldMap[name] = fm
