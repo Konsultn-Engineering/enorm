@@ -3,26 +3,28 @@ package schema
 import (
 	"reflect"
 	"sync"
+	"unsafe"
 )
 
 var scannerRegistry sync.Map // map[reflect.Type]ScannerFunc
 
 // colBind represents a binding between a column index and its setter function
 type colBind struct {
-	index int
-	bind  func(any, any)
+	index     int
+	bind      func(any, any)
+	directSet func(unsafe.Pointer, any) // Direct setter for optimization
 }
 
 // Pools for reducing allocations in hot paths
 var (
 	colBindsPool = sync.Pool{
 		New: func() any {
-			return make([]colBind, 0, 8) // Pre-size for common case
+			return make([]colBind, 0, 16) // Pre-size for common case
 		},
 	}
 	destsPool = sync.Pool{
 		New: func() any {
-			return make([]any, 0, 8) // Pre-size for common case
+			return make([]any, 0, 16) // Pre-size for common case
 		},
 	}
 )
@@ -49,16 +51,6 @@ func wrapScanner(fn func(any, FieldRegistry) error) ScannerFunc {
 			return err
 		}
 
-		// Get pooled slices
-		colBinds := colBindsPool.Get().([]colBind)[:0] // Reset length but keep capacity
-		defer colBindsPool.Put(colBinds)
-		
-		for i, col := range columns {
-			if bind, ok := fr.binds[col]; ok {
-				colBinds = append(colBinds, colBind{index: i, bind: bind})
-			}
-		}
-
 		typ := reflect.TypeOf(target)
 		if typ.Kind() == reflect.Ptr {
 			typ = typ.Elem()
@@ -67,6 +59,25 @@ func wrapScanner(fn func(any, FieldRegistry) error) ScannerFunc {
 		meta, err := Introspect(typ)
 		if err != nil {
 			return err
+		}
+
+		// Get pooled slices
+		colBinds := colBindsPool.Get().([]colBind)[:0] // Reset length but keep capacity
+		defer colBindsPool.Put(colBinds)
+		
+		for i, col := range columns {
+			if bind, ok := fr.binds[col]; ok {
+				// Also get the direct setter for optimization
+				var directSet func(unsafe.Pointer, any)
+				if fm, ok := meta.SnakeMap[col]; ok && fm.DirectSet != nil {
+					directSet = fm.DirectSet
+				}
+				colBinds = append(colBinds, colBind{
+					index:     i,
+					bind:      bind,
+					directSet: directSet,
+				})
+			}
 		}
 
 		// Get pooled destination slice
@@ -97,13 +108,22 @@ func wrapScanner(fn func(any, FieldRegistry) error) ScannerFunc {
 			return err
 		}
 
+		// Get unsafe pointer to struct for direct field access
+		structPtr := unsafe.Pointer(reflect.ValueOf(target).Pointer())
+		
 		for _, cb := range colBinds {
-			// Optimize: avoid reflect.ValueOf by direct pointer dereferencing
-			val := dests[cb.index]
-			// Since dests[i] is already a pointer to the value from getValuePtr,
-			// we need to dereference it to get the actual value
-			actualVal := reflect.ValueOf(val).Elem().Interface()
-			cb.bind(target, actualVal)
+			// Get the value pointer
+			valPtr := dests[cb.index]
+			
+			// Use direct setter if available for better performance
+			if cb.directSet != nil {
+				// Pass the pointer directly to avoid reflection
+				cb.directSet(structPtr, valPtr)
+			} else {
+				// Fallback to regular bind function (requires extracting the value)
+				actualVal := reflect.ValueOf(valPtr).Elem().Interface()
+				cb.bind(target, actualVal)
+			}
 
 			// Return to pool
 			if fm, ok := meta.SnakeMap[columns[cb.index]]; ok {

@@ -1,6 +1,9 @@
 package schema
 
-import "reflect"
+import (
+	"reflect"
+	"unsafe"
+)
 
 type FieldScanFunc func(ptr any, val any)
 
@@ -29,6 +32,10 @@ type FieldMeta struct {
 	IsExported bool
 	SetFunc    func(model any, val any)
 	SetFast    func(ptr any, raw any)
+	// Optimization: store the offset for direct field access
+	Offset     uintptr
+	// Direct setter using unsafe pointers for maximum performance
+	DirectSet  func(structPtr unsafe.Pointer, val any)
 }
 
 type ScannerFunc func(any, RowScanner) error

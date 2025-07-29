@@ -9,7 +9,7 @@ import (
 var registryPool = sync.Pool{
 	New: func() any {
 		return &fieldRegistry{
-			binds: make(map[string]func(entity any, val any), 8), // Pre-size for common case
+			binds: make(map[string]func(entity any, val any), 16), // Pre-size larger
 		}
 	},
 }
