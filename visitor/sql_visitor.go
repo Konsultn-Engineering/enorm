@@ -56,9 +56,8 @@ func (v *SQLVisitor) Reset() {
 func (v *SQLVisitor) Build(root ast.Node) (string, []any, error) {
 	fp := root.Fingerprint()
 
-	// 1. Fast path: retrieve from cache
-	if cached, ok := v.qcache.GetSQL(fp); ok {
-		// Return cached SQL and args, ensure args slice is properly set
+	cached, ok := v.qcache.Get(fp)
+	if ok && cached != nil {
 		if cached.Args != nil {
 			return cached.SQL, cached.Args, nil
 		}
@@ -78,19 +77,21 @@ func (v *SQLVisitor) Build(root ast.Node) (string, []any, error) {
 	var argsCopy []any
 	if len(v.args) > 0 {
 		argsCopy = argsPool.Get().([]any)
-		if cap(argsCopy) < len(v.args) {
-			argsCopy = make([]any, len(v.args))
-		} else {
-			argsCopy = argsCopy[:len(v.args)]
+		defer func() {
+			if argsCopy != nil {
+				argsPool.Put(argsCopy[:0])
+			}
+		}()
+
+		for cap(argsCopy) < len(v.args) {
+			argsCopy = append(argsCopy, nil)
 		}
+		argsCopy = argsCopy[:len(v.args)]
 		copy(argsCopy, v.args)
 	}
-	
-	v.qcache.SetSQL(fp, &cache.CachedQuery{
-		SQL:  sql,
-		Args: argsCopy,
-	})
-	return sql, v.args, nil
+
+	v.qcache.Set(fp, sql, argsCopy, nil, "", "")
+	return sql, argsCopy, nil
 }
 
 func (v *SQLVisitor) Arg(a any) {

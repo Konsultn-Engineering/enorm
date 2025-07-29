@@ -21,6 +21,7 @@ type EntityMeta struct {
 	SnakeMap     map[string]*FieldMeta
 	ScannerFn    ScannerFunc
 	AliasMapping map[string]string
+	Index        uint32
 }
 
 type FieldMeta struct {
@@ -33,9 +34,9 @@ type FieldMeta struct {
 	SetFunc    func(model any, val any)
 	SetFast    func(ptr any, raw any)
 	// Optimization: store the offset for direct field access
-	Offset     uintptr
+	Offset uintptr
 	// Direct setter using unsafe pointers for maximum performance
-	DirectSet  func(structPtr unsafe.Pointer, val any)
+	DirectSet func(structPtr unsafe.Pointer, val any)
 }
 
 type ScannerFunc func(any, RowScanner) error

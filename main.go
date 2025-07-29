@@ -1,17 +1,13 @@
 package main
 
 import (
-	"context"
-	"fmt"
 	"github.com/Konsultn-Engineering/enorm/ast"
 	"github.com/Konsultn-Engineering/enorm/cache"
-	"github.com/Konsultn-Engineering/enorm/connector"
 	"github.com/Konsultn-Engineering/enorm/dialect"
-	"github.com/Konsultn-Engineering/enorm/engine"
 	_ "github.com/Konsultn-Engineering/enorm/providers/postgres"
-	"github.com/Konsultn-Engineering/enorm/schema"
 	"github.com/Konsultn-Engineering/enorm/visitor"
 	"log"
+	"testing"
 	"time"
 )
 
@@ -126,33 +122,10 @@ func test() {
 }
 
 func main() {
-	db, err := connector.New("postgres", connector.Config{
-		Host:     "localhost",
-		Port:     5432,
-		Database: "enorm_test",
-		Username: "postgres",
-		Password: "admin",
-		SSLMode:  "disable",
-	})
+}
 
-	if err != nil {
-		panic(fmt.Sprintf("Failed to connect to database: %v", err))
+func BenchAst(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		test()
 	}
-
-	eng, err := db.Connect(context.Background())
-
-	if err != nil {
-		panic(fmt.Sprintf("Failed to connect: %v", err))
-	}
-
-	e := engine.New(eng.DB())
-
-	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldRegistry) error {
-		u := a.(*User)
-		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt)
-	})
-
-	user := &User{}
-	fmt.Println(e.FindOne(user))
-	fmt.Println(user)
 }

@@ -2,7 +2,7 @@ package engine
 
 import (
 	"database/sql"
-	"errors"
+	"fmt"
 	"github.com/Konsultn-Engineering/enorm/ast"
 	"github.com/Konsultn-Engineering/enorm/cache"
 	"github.com/Konsultn-Engineering/enorm/dialect"
@@ -16,15 +16,17 @@ import (
 type Engine struct {
 	db          *sql.DB
 	qcache      cache.QueryCache
-	selectCache sync.Map    // map[reflect.Type]string
-	addrsPool   sync.Pool   // []any
-	astCache    sync.Map    // map[string]*ast.SelectStmt
-	colCache    sync.Map    // map[string][]ast.Node
+	selectCache sync.Map  // map[reflect.Type]string
+	addrsPool   sync.Pool // []any
+	astCache    sync.Map  // map[string]*ast.SelectStmt
+	colCache    sync.Map  // map[string][]ast.Node
 	stmtCache   cache.StatementCache
+	visitor     *visitor.SQLVisitor
 }
 
 func New(db *sql.DB) *Engine {
 	qc := cache.NewQueryCache()
+	schema.New(1024, func(key reflect.Type, value *schema.EntityMeta) {})
 	return &Engine{
 		db:        db,
 		qcache:    qc,
@@ -34,24 +36,25 @@ func New(db *sql.DB) *Engine {
 				return make([]any, 0, 32)
 			},
 		},
+		visitor: visitor.NewSQLVisitor(dialect.NewPostgresDialect(), qc),
 	}
 }
 
 func (e *Engine) astFromCols(cols []string) []ast.Node {
 	// Create a cache key from column names
 	key := strings.Join(cols, ",")
-	
+
 	// Check cache first
 	if cached, ok := e.colCache.Load(key); ok {
 		return cached.([]ast.Node)
 	}
-	
+
 	// Create new AST nodes
 	result := make([]ast.Node, len(cols))
 	for i, col := range cols {
 		result[i] = &ast.Column{Name: col}
 	}
-	
+
 	// Cache the result
 	e.colCache.Store(key, result)
 	return result
@@ -64,41 +67,27 @@ func (e *Engine) FindOne(dest any) (string, error) {
 		return "", err
 	}
 
-	// Create a cache key for this query type
-	cacheKey := "findone:" + meta.Plural
-	
-	// Check if we have cached AST for this query
-	var selectStmt *ast.SelectStmt
-	if cached, ok := e.astCache.Load(cacheKey); ok {
-		selectStmt = cached.(*ast.SelectStmt)
-	} else {
-		// Build new AST and cache it
-		selectStmt = &ast.SelectStmt{
-			Columns: e.astFromCols([]string{"id", "first_name", "email", "created_at", "updated_at"}),
-			From:    &ast.Table{Name: meta.Plural},
-			Limit:   &ast.LimitClause{Count: ptr(1)},
-		}
-		e.astCache.Store(cacheKey, selectStmt)
+	// create cache key
+	//fixedKey := cache.GenerateFixedKey(cache.MethodFindOne, meta.Index)
+
+	selectStmt := &ast.SelectStmt{
+		Columns: e.astFromCols([]string{"id"}),
+		From:    &ast.Table{Name: meta.Plural},
+		Limit:   &ast.LimitClause{Count: ptr(1)},
 	}
 
-	// Get visitor from pool
-	v := visitor.NewSQLVisitor(dialect.Postgres{}, e.qcache)
-	defer v.Release()
-	
-	query, _, err := v.Build(selectStmt)
+	if selectStmt == nil || selectStmt.From == nil || len(selectStmt.Columns) == 0 {
+		panic("selectStmt is malformed")
+	}
 
+	//defer visitor.Release()
+
+	query, _, err := e.visitor.Build(selectStmt)
 	if err != nil {
 		return "", err
 	}
 
-	// Use prepared statement cache for better performance
-	stmt, err := e.stmtCache.Prepare(query)
-	if err != nil {
-		return "", err
-	}
-
-	rows, err := stmt.Query()
-
+	rows, err := e.db.Query(query)
 	if err != nil {
 		return "", err
 	}
@@ -109,29 +98,31 @@ func (e *Engine) FindOne(dest any) (string, error) {
 		return "", sql.ErrNoRows
 	}
 
-	columns := []string{"id", "first_name", "email", "created_at", "updated_at"} // same as in astFromCols input
+	columns := []string{"id"} // same as in astFromCols input
 	addrs := e.addrsPool.Get().([]any)[:len(columns)]
 	for i := range columns {
 		var v any
 		addrs[i] = &v
 	}
 
+	scanner := meta.ScannerFn
+
+	if scanner == nil {
+		return "", fmt.Errorf("no scanner registered for type %s", meta.Type.Name())
+	}
+
+	err = scanner(dest, rows)
+	if err != nil {
+		return "", fmt.Errorf("failed to scan result: %w", err)
+	} /// some logic to execute the query
+
 	err = rows.Scan(addrs...)
 
-	if errors.Is(err, sql.ErrNoRows) {
-		e.addrsPool.Put(addrs[:0])
-		return query, nil // or return "", nil depending on intent
-	}
 	if err != nil {
-		e.addrsPool.Put(addrs[:0])
 		return "", err
 	}
 
-	if meta.ScannerFn != nil {
-		err = meta.ScannerFn(dest, rows)
-	}
-
-	return query, err
+	return "", nil
 }
 
 func ptr[T any](v T) *T { return &v }

@@ -22,4 +22,6 @@ type Visitor interface {
 	VisitGroupBy(*GroupByClause) error
 	VisitOrderByClause(*OrderByClause) error
 	VisitLimitClause(*LimitClause) error
+	Build(root Node) (string, []any, error)
+	Release()
 }

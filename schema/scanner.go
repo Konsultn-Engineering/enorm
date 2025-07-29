@@ -46,7 +46,7 @@ func wrapScanner(fn func(any, FieldRegistry) error) ScannerFunc {
 	return func(target any, row RowScanner) error {
 		fr := newRegistry(target)
 		defer returnRegistry(fr)
-		
+
 		if err := fn(target, fr); err != nil {
 			return err
 		}
@@ -74,7 +74,7 @@ func wrapScanner(fn func(any, FieldRegistry) error) ScannerFunc {
 			colBinds = colBinds[:0] // Reset length but keep capacity
 		}
 		defer colBindsPool.Put(colBinds)
-		
+
 		// Build column bindings directly from metadata to avoid map lookups
 		for i, col := range columns {
 			if fm, ok := meta.SnakeMap[col]; ok && fm.DirectSet != nil {
@@ -96,7 +96,7 @@ func wrapScanner(fn func(any, FieldRegistry) error) ScannerFunc {
 			dests = dests[:len(columns)]
 		}
 		defer destsPool.Put(dests)
-		
+
 		// Track pooled dummy values for cleanup
 		var pooledDummies []any
 		defer func() {
@@ -104,22 +104,23 @@ func wrapScanner(fn func(any, FieldRegistry) error) ScannerFunc {
 				dummyPool.Put(dummy)
 			}
 		}()
-		
+
 		for i, col := range columns {
-			if _, ok := fr.binds[col]; ok {
-				if fm, ok := meta.SnakeMap[col]; ok {
+			if fm, ok := meta.SnakeMap[col]; ok && fm.DirectSet != nil {
+				if _, bound := fr.binds[col]; bound {
 					valPtr := getValuePtr(fm.Type)
 					dests[i] = valPtr
-				} else {
-					dummy := dummyPool.Get()
-					dests[i] = dummy
-					pooledDummies = append(pooledDummies, dummy)
+					colBinds = append(colBinds, colBind{
+						index:     i,
+						directSet: fm.DirectSet,
+					})
+					continue
 				}
-			} else {
-				dummy := dummyPool.Get()
-				dests[i] = dummy
-				pooledDummies = append(pooledDummies, dummy)
 			}
+
+			dummy := dummyPool.Get()
+			dests[i] = dummy
+			pooledDummies = append(pooledDummies, dummy)
 		}
 
 		if err := row.Scan(dests...); err != nil {
@@ -128,7 +129,7 @@ func wrapScanner(fn func(any, FieldRegistry) error) ScannerFunc {
 
 		// Get unsafe pointer to struct for direct field access
 		structPtr := unsafe.Pointer(reflect.ValueOf(target).Pointer())
-		
+
 		for _, cb := range colBinds {
 			// Get the value pointer and use direct setter
 			valPtr := dests[cb.index]

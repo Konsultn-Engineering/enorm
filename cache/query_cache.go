@@ -13,30 +13,47 @@ type CachedQuery struct {
 }
 
 type QueryCache interface {
-	GetSQL(fingerprint uint64) (*CachedQuery, bool)
-	SetSQL(fingerprint uint64, q *CachedQuery)
+	Get(fingerprint uint64) (*CachedQuery, bool)
+	Set(fingerprint uint64, sql string, args []any, argsOrder []string, stmtKey string, scannerID string)
 }
 
 type memQueryCache struct {
-	mu   sync.RWMutex
-	data map[uint64]*CachedQuery
+	mu             sync.RWMutex
+	data           map[uint64]*CachedQuery
+	queryCachePool sync.Pool
 }
 
 func NewQueryCache() QueryCache {
 	return &memQueryCache{
 		data: make(map[uint64]*CachedQuery, 1024),
+		queryCachePool: sync.Pool{
+			New: func() any {
+				return new(CachedQuery)
+			},
+		},
 	}
 }
 
-func (c *memQueryCache) GetSQL(f uint64) (*CachedQuery, bool) {
+func (c *memQueryCache) Get(f uint64) (*CachedQuery, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	q, ok := c.data[f]
 	return q, ok
 }
 
-func (c *memQueryCache) SetSQL(f uint64, q *CachedQuery) {
+func (c *memQueryCache) Set(f uint64, sql string, args []any, argsOrder []string, stmtKey string, scannerID string) {
+	q := c.queryCachePool.Get().(*CachedQuery)
+	if q == nil {
+		panic("pooled CachedQuery is nil")
+	}
+
+	q.SQL = sql
+	q.Args = args
+	q.ArgsOrder = argsOrder
+	q.StmtKey = stmtKey
+	q.ScannerID = scannerID
+
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.data[f] = q
+	c.mu.Unlock()
 }

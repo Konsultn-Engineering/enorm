@@ -4,6 +4,7 @@ import (
 	"context"
 	"github.com/Konsultn-Engineering/enorm/schema"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"runtime"
 	"testing"
 	"time"
 
@@ -35,10 +36,13 @@ func init() {
 			MaxLifetime: time.Hour,
 		},
 	})
+
 	if err != nil {
 		panic("Failed to init connector: " + err.Error())
 	}
 	db, err := conn.Connect(context.Background())
+	db.DB().Exec("CREATE TABLE IF NOT EXISTS users (\n  id BIGSERIAL PRIMARY KEY,\n  first_name TEXT NOT NULL,\n  email TEXT NOT NULL,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n")
+	db.DB().Exec("INSERT INTO users (first_name, email) VALUES ('sol', 'sol@sol.com')")
 	if err != nil {
 		panic("Failed to connect: " + err.Error())
 	}
@@ -47,18 +51,19 @@ func init() {
 }
 
 func BenchmarkFindOne(b *testing.B) {
-	b.ResetTimer()
 	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldRegistry) error {
 		u := a.(*User)
 		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt)
 	})
 
-	//context := context.Background()
-
 	u := User{}
+
+	// Warm-up or validate connection
+	_, _ = e.FindOne(&u)
+	runtime.GC()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, _ = e.FindOne(&u) // SELECT * FROM users LIMIT 1
+		_, _ = e.FindOne(&u)
 	}
 
 	b.ReportAllocs()
@@ -75,8 +80,8 @@ func BenchmarkPGXRawScan(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		var id int
-		var username, email string
-		err := pool.QueryRow(ctx, `SELECT id, first_name, email FROM users WHERE id = 1`).Scan(&id, &username, &email)
+		//var username, email string
+		err := pool.QueryRow(ctx, `SELECT id FROM users LIMIT 1`).Scan(&id)
 		if err != nil {
 			b.Fatal(err)
 		}
