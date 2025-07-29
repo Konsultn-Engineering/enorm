@@ -11,7 +11,6 @@ var scannerRegistry sync.Map // map[reflect.Type]ScannerFunc
 // colBind represents a binding between a column index and its setter function
 type colBind struct {
 	index     int
-	bind      func(any, any)
 	directSet func(unsafe.Pointer, any) // Direct setter for optimization
 }
 
@@ -25,6 +24,12 @@ var (
 	destsPool = sync.Pool{
 		New: func() any {
 			return make([]any, 0, 16) // Pre-size for common case
+		},
+	}
+	dummyPool = sync.Pool{
+		New: func() any {
+			dummy := new(any)
+			return dummy
 		},
 	}
 )
@@ -62,21 +67,24 @@ func wrapScanner(fn func(any, FieldRegistry) error) ScannerFunc {
 		}
 
 		// Get pooled slices
-		colBinds := colBindsPool.Get().([]colBind)[:0] // Reset length but keep capacity
+		colBinds := colBindsPool.Get().([]colBind)
+		if cap(colBinds) < len(columns) {
+			colBinds = make([]colBind, 0, len(columns))
+		} else {
+			colBinds = colBinds[:0] // Reset length but keep capacity
+		}
 		defer colBindsPool.Put(colBinds)
 		
+		// Build column bindings directly from metadata to avoid map lookups
 		for i, col := range columns {
-			if bind, ok := fr.binds[col]; ok {
-				// Also get the direct setter for optimization
-				var directSet func(unsafe.Pointer, any)
-				if fm, ok := meta.SnakeMap[col]; ok && fm.DirectSet != nil {
-					directSet = fm.DirectSet
+			if fm, ok := meta.SnakeMap[col]; ok && fm.DirectSet != nil {
+				// Verify this column was bound in the registry
+				if _, bound := fr.binds[col]; bound {
+					colBinds = append(colBinds, colBind{
+						index:     i,
+						directSet: fm.DirectSet,
+					})
 				}
-				colBinds = append(colBinds, colBind{
-					index:     i,
-					bind:      bind,
-					directSet: directSet,
-				})
 			}
 		}
 
@@ -89,18 +97,28 @@ func wrapScanner(fn func(any, FieldRegistry) error) ScannerFunc {
 		}
 		defer destsPool.Put(dests)
 		
+		// Track pooled dummy values for cleanup
+		var pooledDummies []any
+		defer func() {
+			for _, dummy := range pooledDummies {
+				dummyPool.Put(dummy)
+			}
+		}()
+		
 		for i, col := range columns {
 			if _, ok := fr.binds[col]; ok {
 				if fm, ok := meta.SnakeMap[col]; ok {
 					valPtr := getValuePtr(fm.Type)
 					dests[i] = valPtr
 				} else {
-					var fallback any
-					dests[i] = &fallback
+					dummy := dummyPool.Get()
+					dests[i] = dummy
+					pooledDummies = append(pooledDummies, dummy)
 				}
 			} else {
-				var dummy any
-				dests[i] = &dummy
+				dummy := dummyPool.Get()
+				dests[i] = dummy
+				pooledDummies = append(pooledDummies, dummy)
 			}
 		}
 
@@ -112,18 +130,9 @@ func wrapScanner(fn func(any, FieldRegistry) error) ScannerFunc {
 		structPtr := unsafe.Pointer(reflect.ValueOf(target).Pointer())
 		
 		for _, cb := range colBinds {
-			// Get the value pointer
+			// Get the value pointer and use direct setter
 			valPtr := dests[cb.index]
-			
-			// Use direct setter if available for better performance
-			if cb.directSet != nil {
-				// Pass the pointer directly to avoid reflection
-				cb.directSet(structPtr, valPtr)
-			} else {
-				// Fallback to regular bind function (requires extracting the value)
-				actualVal := reflect.ValueOf(valPtr).Elem().Interface()
-				cb.bind(target, actualVal)
-			}
+			cb.directSet(structPtr, valPtr)
 
 			// Return to pool
 			if fm, ok := meta.SnakeMap[columns[cb.index]]; ok {
