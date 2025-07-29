@@ -9,6 +9,20 @@ import (
 	"sync"
 )
 
+var visitorPool = sync.Pool{
+	New: func() any {
+		return &SQLVisitor{
+			args: make([]any, 0, 8),
+		}
+	},
+}
+
+var argsPool = sync.Pool{
+	New: func() any {
+		return make([]any, 0, 8)
+	},
+}
+
 type SQLVisitor struct {
 	sb      strings.Builder
 	args    []any
@@ -18,10 +32,20 @@ type SQLVisitor struct {
 }
 
 func NewSQLVisitor(d dialect.Dialect, q cache.QueryCache) *SQLVisitor {
-	return &SQLVisitor{
-		dialect: d,
-		qcache:  q,
-	}
+	v := visitorPool.Get().(*SQLVisitor)
+	v.dialect = d
+	v.qcache = q
+	v.sb.Reset()
+	v.args = v.args[:0]
+	return v
+}
+
+func (v *SQLVisitor) Release() {
+	v.dialect = nil
+	v.qcache = nil
+	v.sb.Reset()
+	v.args = v.args[:0]
+	visitorPool.Put(v)
 }
 
 func (v *SQLVisitor) Reset() {
@@ -34,7 +58,11 @@ func (v *SQLVisitor) Build(root ast.Node) (string, []any, error) {
 
 	// 1. Fast path: retrieve from cache
 	if cached, ok := v.qcache.GetSQL(fp); ok {
-		return cached.SQL, v.args, nil // assume args set via Accept
+		// Return cached SQL and args, ensure args slice is properly set
+		if cached.Args != nil {
+			return cached.SQL, cached.Args, nil
+		}
+		return cached.SQL, nil, nil
 	}
 
 	// 2. Slow path: render and cache
@@ -46,7 +74,22 @@ func (v *SQLVisitor) Build(root ast.Node) (string, []any, error) {
 	}
 
 	sql := v.sb.String()
-	v.qcache.SetSQL(fp, &cache.CachedQuery{SQL: sql})
+	// Cache both SQL and args - use pooled slice for args copy
+	var argsCopy []any
+	if len(v.args) > 0 {
+		argsCopy = argsPool.Get().([]any)
+		if cap(argsCopy) < len(v.args) {
+			argsCopy = make([]any, len(v.args))
+		} else {
+			argsCopy = argsCopy[:len(v.args)]
+		}
+		copy(argsCopy, v.args)
+	}
+	
+	v.qcache.SetSQL(fp, &cache.CachedQuery{
+		SQL:  sql,
+		Args: argsCopy,
+	})
 	return sql, v.args, nil
 }
 
