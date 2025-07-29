@@ -23,7 +23,7 @@ type TestUser struct {
 func BenchmarkEngineQueryBuildingOnly(b *testing.B) {
 	// Create an engine without database
 	e := &Engine{
-		visitor: visitor.NewSQLVisitor(dialect.Postgres{}, cache.NewQueryCache()),
+		qcache: cache.NewQueryCache(),
 	}
 	
 	// Register test schema
@@ -56,8 +56,9 @@ func BenchmarkEngineQueryBuildingOnly(b *testing.B) {
 			e.astCache.Store(cacheKey, selectStmt)
 		}
 
-		_, _, _ = e.visitor.Build(selectStmt)
-		e.visitor.Reset()
+		v := visitor.NewSQLVisitor(dialect.Postgres{}, e.qcache)
+		_, _, _ = v.Build(selectStmt)
+		v.Release()
 	}
 	b.ReportAllocs()
 }
@@ -65,7 +66,7 @@ func BenchmarkEngineQueryBuildingOnly(b *testing.B) {
 func BenchmarkEngineQueryBuildingCached(b *testing.B) {
 	// Create an engine without database
 	e := &Engine{
-		visitor: visitor.NewSQLVisitor(dialect.Postgres{}, cache.NewQueryCache()),
+		qcache: cache.NewQueryCache(),
 	}
 	
 	// Register test schema
@@ -86,7 +87,9 @@ func BenchmarkEngineQueryBuildingCached(b *testing.B) {
 	}
 	e.astCache.Store(cacheKey, selectStmt)
 	// Also prime the SQL cache
-	e.visitor.Build(selectStmt)
+	v := visitor.NewSQLVisitor(dialect.Postgres{}, e.qcache)
+	v.Build(selectStmt)
+	v.Release()
 	
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -100,8 +103,9 @@ func BenchmarkEngineQueryBuildingCached(b *testing.B) {
 		cached, _ := e.astCache.Load(cacheKey)
 		selectStmt := cached.(*ast.SelectStmt)
 
-		_, _, _ = e.visitor.Build(selectStmt)
-		e.visitor.Reset()
+		v := visitor.NewSQLVisitor(dialect.Postgres{}, e.qcache)
+		_, _, _ = v.Build(selectStmt)
+		v.Release()
 	}
 	b.ReportAllocs()
 }

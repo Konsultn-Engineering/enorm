@@ -15,7 +15,7 @@ import (
 
 type Engine struct {
 	db          *sql.DB
-	visitor     *visitor.SQLVisitor
+	qcache      cache.QueryCache
 	selectCache sync.Map    // map[reflect.Type]string
 	addrsPool   sync.Pool   // []any
 	astCache    sync.Map    // map[string]*ast.SelectStmt
@@ -24,10 +24,10 @@ type Engine struct {
 }
 
 func New(db *sql.DB) *Engine {
-	v := visitor.NewSQLVisitor(dialect.Postgres{}, cache.NewQueryCache())
+	qc := cache.NewQueryCache()
 	return &Engine{
 		db:        db,
-		visitor:   v,
+		qcache:    qc,
 		stmtCache: cache.NewStatementCache(db),
 		addrsPool: sync.Pool{
 			New: func() any {
@@ -81,7 +81,11 @@ func (e *Engine) FindOne(dest any) (string, error) {
 		e.astCache.Store(cacheKey, selectStmt)
 	}
 
-	query, _, err := e.visitor.Build(selectStmt)
+	// Get visitor from pool
+	v := visitor.NewSQLVisitor(dialect.Postgres{}, e.qcache)
+	defer v.Release()
+	
+	query, _, err := v.Build(selectStmt)
 
 	if err != nil {
 		return "", err
