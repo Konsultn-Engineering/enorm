@@ -9,21 +9,26 @@ import (
 	"github.com/Konsultn-Engineering/enorm/schema"
 	"github.com/Konsultn-Engineering/enorm/visitor"
 	"reflect"
+	"strings"
 	"sync"
 )
 
 type Engine struct {
 	db          *sql.DB
 	visitor     *visitor.SQLVisitor
-	selectCache sync.Map  // map[reflect.Type]string
-	addrsPool   sync.Pool // []any
+	selectCache sync.Map    // map[reflect.Type]string
+	addrsPool   sync.Pool   // []any
+	astCache    sync.Map    // map[string]*ast.SelectStmt
+	colCache    sync.Map    // map[string][]ast.Node
+	stmtCache   cache.StatementCache
 }
 
 func New(db *sql.DB) *Engine {
 	v := visitor.NewSQLVisitor(dialect.Postgres{}, cache.NewQueryCache())
 	return &Engine{
-		db:      db,
-		visitor: v,
+		db:        db,
+		visitor:   v,
+		stmtCache: cache.NewStatementCache(db),
 		addrsPool: sync.Pool{
 			New: func() any {
 				return make([]any, 0, 32)
@@ -33,12 +38,22 @@ func New(db *sql.DB) *Engine {
 }
 
 func (e *Engine) astFromCols(cols []string) []ast.Node {
-	var result []ast.Node
-
-	for _, col := range cols {
-		result = append(result, &ast.Column{Name: col})
+	// Create a cache key from column names
+	key := strings.Join(cols, ",")
+	
+	// Check cache first
+	if cached, ok := e.colCache.Load(key); ok {
+		return cached.([]ast.Node)
 	}
-
+	
+	// Create new AST nodes
+	result := make([]ast.Node, len(cols))
+	for i, col := range cols {
+		result[i] = &ast.Column{Name: col}
+	}
+	
+	// Cache the result
+	e.colCache.Store(key, result)
 	return result
 }
 
@@ -49,10 +64,21 @@ func (e *Engine) FindOne(dest any) (string, error) {
 		return "", err
 	}
 
-	selectStmt := &ast.SelectStmt{
-		Columns: e.astFromCols([]string{"id", "first_name", "email", "created_at", "updated_at"}),
-		From:    &ast.Table{Name: meta.Plural},
-		Limit:   &ast.LimitClause{Count: ptr(1)},
+	// Create a cache key for this query type
+	cacheKey := "findone:" + meta.Plural
+	
+	// Check if we have cached AST for this query
+	var selectStmt *ast.SelectStmt
+	if cached, ok := e.astCache.Load(cacheKey); ok {
+		selectStmt = cached.(*ast.SelectStmt)
+	} else {
+		// Build new AST and cache it
+		selectStmt = &ast.SelectStmt{
+			Columns: e.astFromCols([]string{"id", "first_name", "email", "created_at", "updated_at"}),
+			From:    &ast.Table{Name: meta.Plural},
+			Limit:   &ast.LimitClause{Count: ptr(1)},
+		}
+		e.astCache.Store(cacheKey, selectStmt)
 	}
 
 	query, _, err := e.visitor.Build(selectStmt)
@@ -61,7 +87,13 @@ func (e *Engine) FindOne(dest any) (string, error) {
 		return "", err
 	}
 
-	rows, err := e.db.Query(query)
+	// Use prepared statement cache for better performance
+	stmt, err := e.stmtCache.Prepare(query)
+	if err != nil {
+		return "", err
+	}
+
+	rows, err := stmt.Query()
 
 	if err != nil {
 		return "", err
