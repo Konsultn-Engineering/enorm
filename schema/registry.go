@@ -3,7 +3,16 @@ package schema
 import (
 	"fmt"
 	"reflect"
+	"sync"
 )
+
+var registryPool = sync.Pool{
+	New: func() any {
+		return &fieldRegistry{
+			binds: make(map[string]func(entity any, val any), 8), // Pre-size for common case
+		}
+	},
+}
 
 type fieldRegistry struct {
 	entity any
@@ -11,10 +20,18 @@ type fieldRegistry struct {
 }
 
 func newRegistry(entity any) *fieldRegistry {
-	return &fieldRegistry{
-		entity: entity,
-		binds:  map[string]func(entity any, val any){},
+	fr := registryPool.Get().(*fieldRegistry)
+	fr.entity = entity
+	// Clear the map but keep capacity
+	for k := range fr.binds {
+		delete(fr.binds, k)
 	}
+	return fr
+}
+
+func returnRegistry(fr *fieldRegistry) {
+	fr.entity = nil
+	registryPool.Put(fr)
 }
 
 func (f *fieldRegistry) Bind(entity any, fields ...any) error {

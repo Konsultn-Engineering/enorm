@@ -5,6 +5,31 @@ import (
 	"reflect"
 )
 
+// Pre-compiled setter functions to avoid closure allocations
+func createSetFunc(index []int, fieldType reflect.Type, fieldName string) func(model any, val any) {
+	return func(model any, val any) {
+		field := reflect.ValueOf(model).Elem().FieldByIndex(index)
+		v := reflect.ValueOf(val)
+		if v.Type().ConvertibleTo(fieldType) {
+			field.Set(v.Convert(fieldType))
+		} else {
+			panic(fmt.Sprintf("cannot assign %s to field %s (%s)", v.Type(), fieldName, fieldType))
+		}
+	}
+}
+
+func createSetFastFunc(index []int, fieldType reflect.Type, fieldName string) func(ptr any, raw any) {
+	return func(ptr any, raw any) {
+		dst := reflect.ValueOf(ptr).Elem().FieldByIndex(index)
+		src := reflect.ValueOf(raw)
+		if src.Type().ConvertibleTo(fieldType) {
+			dst.Set(src.Convert(fieldType))
+		} else {
+			panic(fmt.Sprintf("type mismatch for field %s", fieldName))
+		}
+	}
+}
+
 func buildMeta(t reflect.Type) (*EntityMeta, error) {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
@@ -43,28 +68,9 @@ func buildMeta(t reflect.Type) (*EntityMeta, error) {
 			IsExported: true,
 		}
 
-		fm.SetFunc = func(model any, val any) {
-			field := reflect.ValueOf(model).Elem().FieldByIndex(f.Index)
-			v := reflect.ValueOf(val)
-			if v.Type().ConvertibleTo(field.Type()) {
-				field.Set(v.Convert(field.Type()))
-			} else {
-				panic(fmt.Sprintf("cannot assign %s to field %s (%s)", v.Type(), f.Name, field.Type()))
-			}
-		}
-
-		idx := f.Index
-		targetType := f.Type
-
-		fm.SetFast = func(ptr any, raw any) {
-			dst := reflect.ValueOf(ptr).Elem().FieldByIndex(idx)
-			src := reflect.ValueOf(raw)
-			if src.Type().ConvertibleTo(targetType) {
-				dst.Set(src.Convert(targetType))
-			} else {
-				panic(fmt.Sprintf("type mismatch for field %s", f.Name))
-			}
-		}
+		// Pre-compile setter functions to avoid closure allocations
+		fm.SetFunc = createSetFunc(f.Index, f.Type, f.Name)
+		fm.SetFast = createSetFastFunc(f.Index, f.Type, f.Name)
 
 		meta.Fields = append(meta.Fields, fm)
 		meta.FieldMap[name] = fm
