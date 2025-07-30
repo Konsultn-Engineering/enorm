@@ -59,7 +59,7 @@ func BenchmarkFindOne(b *testing.B) {
 	u := User{}
 
 	// Warm-up or validate connection
-	_, _ = e.FindOne(&u)
+	//_, _ = e.FindOne(&u)
 	runtime.GC()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

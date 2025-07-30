@@ -36,7 +36,7 @@ func createSetFastFunc(index []int, fieldType reflect.Type, fieldName string) fu
 func createDirectSetterFunc(offset uintptr, fieldType reflect.Type) func(structPtr unsafe.Pointer, valPtr any) {
 	return func(structPtr unsafe.Pointer, valPtr any) {
 		fieldPtr := unsafe.Add(structPtr, offset)
-		
+
 		// Extract value from pointer without reflection for common types
 		switch fieldType.Kind() {
 		case reflect.Uint64:
@@ -63,12 +63,14 @@ func createDirectSetterFunc(offset uintptr, fieldType reflect.Type) func(structP
 				}
 			}
 		}
-		
+
 		// Fallback to reflection for complex types (should be rare)
 		field := reflect.NewAt(fieldType, fieldPtr).Elem()
-		v := reflect.ValueOf(valPtr).Elem()
+		v := reflect.ValueOf(valPtr).Elem() // this time you DO need Elem here
 		if v.Type().ConvertibleTo(fieldType) {
 			field.Set(v.Convert(fieldType))
+		} else {
+			panic(fmt.Sprintf("type mismatch: %v -> %v", v.Type(), fieldType))
 		}
 	}
 }

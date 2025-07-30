@@ -2,7 +2,6 @@ package engine
 
 import (
 	"database/sql"
-	"fmt"
 	"github.com/Konsultn-Engineering/enorm/ast"
 	"github.com/Konsultn-Engineering/enorm/cache"
 	"github.com/Konsultn-Engineering/enorm/dialect"
@@ -11,6 +10,8 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
+	"unsafe"
 )
 
 type Engine struct {
@@ -62,25 +63,15 @@ func (e *Engine) astFromCols(cols []string) []ast.Node {
 
 func (e *Engine) FindOne(dest any) (string, error) {
 	meta, err := schema.Introspect(reflect.TypeOf(dest))
-
 	if err != nil {
 		return "", err
 	}
 
-	// create cache key
-	//fixedKey := cache.GenerateFixedKey(cache.MethodFindOne, meta.Index)
-
 	selectStmt := &ast.SelectStmt{
-		Columns: e.astFromCols([]string{"id"}),
+		Columns: e.astFromCols([]string{"id"}), // or build dynamically from meta.Fields
 		From:    &ast.Table{Name: meta.Plural},
 		Limit:   &ast.LimitClause{Count: ptr(1)},
 	}
-
-	if selectStmt == nil || selectStmt.From == nil || len(selectStmt.Columns) == 0 {
-		panic("selectStmt is malformed")
-	}
-
-	//defer visitor.Release()
 
 	query, _, err := e.visitor.Build(selectStmt)
 	if err != nil {
@@ -91,38 +82,68 @@ func (e *Engine) FindOne(dest any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
 	defer rows.Close()
 
 	if !rows.Next() {
 		return "", sql.ErrNoRows
 	}
 
-	columns := []string{"id"} // same as in astFromCols input
-	addrs := e.addrsPool.Get().([]any)[:len(columns)]
-	for i := range columns {
-		var v any
-		addrs[i] = &v
+	// Create temporary holders for scanned values
+	columns := []string{"id"} // this should match astFromCols
+	scanVals := make([]any, len(columns))
+	for i := range scanVals {
+		var tmp any
+		scanVals[i] = &tmp
 	}
 
-	scanner := meta.ScannerFn
-
-	if scanner == nil {
-		return "", fmt.Errorf("no scanner registered for type %s", meta.Type.Name())
-	}
-
-	err = scanner(dest, rows)
-	if err != nil {
-		return "", fmt.Errorf("failed to scan result: %w", err)
-	} /// some logic to execute the query
-
-	err = rows.Scan(addrs...)
-
+	// Perform the scan
+	err = rows.Scan(scanVals...)
 	if err != nil {
 		return "", err
 	}
 
-	return "", nil
+	// Apply scanned values using DirectSet
+	structVal := reflect.ValueOf(dest).Elem()
+	structPtr := unsafe.Pointer(structVal.UnsafeAddr())
+
+	for i, col := range columns {
+		fieldMeta := meta.SnakeMap[col]
+		if fieldMeta == nil {
+			continue // ignore unmapped fields
+		}
+
+		raw := *(scanVals[i].(*any))
+
+		switch fieldMeta.Type.Kind() {
+		case reflect.Uint64:
+			if v, ok := raw.(int64); ok {
+				tmp := uint64(v)
+				fieldMeta.DirectSet(structPtr, &tmp)
+				continue
+			}
+		case reflect.Int64:
+			if v, ok := raw.(int64); ok {
+				fieldMeta.DirectSet(structPtr, &v)
+				continue
+			}
+		case reflect.String:
+			if v, ok := raw.(string); ok {
+				fieldMeta.DirectSet(structPtr, &v)
+				continue
+			}
+		case reflect.Struct:
+			if fieldMeta.Type.String() == "time.Time" {
+				if v, ok := raw.(time.Time); ok {
+					fieldMeta.DirectSet(structPtr, &v)
+					continue
+				}
+			}
+		}
+
+		fieldMeta.DirectSet(structPtr, &raw)
+	}
+
+	return query, nil
 }
 
 func ptr[T any](v T) *T { return &v }
