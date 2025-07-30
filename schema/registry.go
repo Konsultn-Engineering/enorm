@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
+	"unsafe"
 )
 
 // registryPool maintains reusable fieldRegistry instances to minimize allocations
@@ -97,12 +98,17 @@ func (f *fieldRegistry) Bind(entity any, fields ...any) error {
 				dbName := formatName(fieldName)
 
 				// Direct map lookup - already cached from Introspect()
-				if fm, exists := meta.FieldMap[fieldName]; exists && fm.SetFast != nil {
-					f.binds[dbName] = fm.SetFast
+				if fm, exists := meta.FieldMap[fieldName]; exists && fm.DirectSet != nil {
+					// Create a wrapper that converts the signature
+					f.binds[dbName] = func(model any, val any) {
+						structVal := reflect.ValueOf(model).Elem()
+						structPtr := unsafe.Pointer(structVal.UnsafeAddr())
+						fm.DirectSet(structPtr, val)
+					}
 					found = true
-					break // Early termination
+					break
 				}
-				return fmt.Errorf("no SetFast for field %s", fieldName)
+				return fmt.Errorf("no Setter for field %s", fieldName)
 			}
 		}
 

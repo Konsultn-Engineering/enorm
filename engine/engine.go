@@ -67,7 +67,7 @@ func (e *Engine) FindOne(dest any) (string, error) {
 
 	selectStmt := &ast.SelectStmt{
 		Columns: e.astFromCols([]string{"id"}), // or build dynamically from meta.Fields
-		From:    &ast.Table{Name: meta.Plural},
+		From:    &ast.Table{Name: meta.TableName},
 		Limit:   &ast.LimitClause{Count: ptr(1)},
 	}
 

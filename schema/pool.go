@@ -24,9 +24,7 @@ var byteSlicePool = &sync.Pool{
 // timePool provides reusable time.Time instances for temporal database columns.
 // Specialized pool since time.Time is extremely common in database schemas
 // and has significant allocation overhead when created repeatedly.
-var timePool = &sync.Pool{
-	New: func() any { return new(time.Time) },
-}
+var timePool = sync.Pool{New: func() any { return new(time.Time) }}
 
 // 🆕 OPTIMIZATION 1: Pool for reflect.Value slices to avoid allocations in reflection-heavy operations
 // reflectValuePool provides reusable []reflect.Value slices for metadata operations.

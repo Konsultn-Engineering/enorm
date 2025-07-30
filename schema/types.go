@@ -15,10 +15,12 @@ type FieldRegistry interface {
 type EntityMeta struct {
 	Type                 reflect.Type
 	Name                 string
-	Plural               string
+	HasCustomTableName   bool
+	TableName            string
 	Fields               []*FieldMeta
-	FieldMap             map[string]*FieldMeta // Go field name -> FieldMeta
-	ColumnMap            map[string]*FieldMeta // Database column name -> FieldMeta (renamed from SnakeMap)
+	FieldMap             map[string]*FieldMeta  // Go field name -> FieldMeta
+	ColumnMap            map[string]*FieldMeta  // Database column name -> FieldMeta (renamed from SnakeMap)
+	AddressMap           map[uintptr]*FieldMeta // NEW: field address -> FieldMeta for O(1) lookup
 	ScannerFn            ScannerFunc
 	AliasMapping         map[string]string
 	preallocatedScanVals []interface{}
@@ -67,10 +69,6 @@ type FieldMeta struct {
 	// Optimization: store the offset for direct field access
 	Offset    uintptr
 	Generator IDGenerator
-
-	// Function pointers for fast setting
-	SetFunc func(model any, val any)
-	SetFast func(ptr any, raw any)
 	// Direct setter using unsafe pointers for maximum performance
 	DirectSet func(structPtr unsafe.Pointer, val any)
 }

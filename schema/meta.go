@@ -83,31 +83,52 @@ func createSetFastFunc(index []int, fieldType reflect.Type, fieldName string) fu
 //
 // Returns: Ultra-fast setter function using direct memory access
 func createDirectSetterFunc(offset uintptr, fieldType reflect.Type) func(structPtr unsafe.Pointer, value any) {
+	fieldKind := fieldType.Kind()
+
+	// Pre-compute type checks to avoid runtime reflection
+	isTimeType := fieldType == reflect.TypeOf(time.Time{})
+
 	return func(structPtr unsafe.Pointer, value any) {
 		fieldPtr := unsafe.Add(structPtr, offset)
-		actualValue := extractValue(value)
 
-		// Fast path for common types - avoid reflection entirely
-		switch fieldType.Kind() {
+		// Eliminate extractValue() call overhead for common cases
+		switch fieldKind {
 		case reflect.Uint64:
-			if v, ok := actualValue.(uint64); ok {
+			if v, ok := value.(uint64); ok {
 				*(*uint64)(fieldPtr) = v
 				return
 			}
+			// Handle pointer unwrapping only when needed
+			if pv, ok := value.(*uint64); ok && pv != nil {
+				*(*uint64)(fieldPtr) = *pv
+				return
+			}
 		case reflect.String:
-			if v, ok := actualValue.(string); ok {
+			if v, ok := value.(string); ok {
 				*(*string)(fieldPtr) = v
 				return
 			}
+			if pv, ok := value.(*string); ok && pv != nil {
+				*(*string)(fieldPtr) = *pv
+				return
+			}
 		case reflect.Int64:
-			if v, ok := actualValue.(int64); ok {
+			if v, ok := value.(int64); ok {
 				*(*int64)(fieldPtr) = v
 				return
 			}
+			if pv, ok := value.(*int64); ok && pv != nil {
+				*(*int64)(fieldPtr) = *pv
+				return
+			}
 		case reflect.Struct:
-			if fieldType == reflect.TypeOf(time.Time{}) {
-				if v, ok := actualValue.(time.Time); ok {
+			if isTimeType {
+				if v, ok := value.(time.Time); ok {
 					*(*time.Time)(fieldPtr) = v
+					return
+				}
+				if pv, ok := value.(*time.Time); ok && pv != nil {
+					*(*time.Time)(fieldPtr) = *pv
 					return
 				}
 			}
@@ -115,9 +136,11 @@ func createDirectSetterFunc(offset uintptr, fieldType reflect.Type) func(structP
 			panic("unhandled default case")
 		}
 
-		// Fallback to reflection for complex types
+		// Fallback to reflection for complex types (minimize this path)
+		actualValue := extractValue(value)
 		field := reflect.NewAt(fieldType, fieldPtr).Elem()
 		val := reflect.ValueOf(actualValue)
+
 		if val.Type().ConvertibleTo(fieldType) {
 			field.Set(val.Convert(fieldType))
 		} else {
@@ -125,7 +148,6 @@ func createDirectSetterFunc(offset uintptr, fieldType reflect.Type) func(structP
 		}
 	}
 }
-
 func extractValue(value any) any {
 	val := reflect.ValueOf(value)
 
@@ -173,7 +195,6 @@ func buildMeta(t reflect.Type) (*EntityMeta, error) {
 	meta := &EntityMeta{
 		Type:         t,
 		Name:         t.Name(),
-		Plural:       pluralize(t.Name()),
 		Fields:       make([]*FieldMeta, 0, estimatedExportedFields),
 		FieldMap:     make(map[string]*FieldMeta, estimatedExportedFields),
 		ColumnMap:    make(map[string]*FieldMeta, estimatedExportedFields),
@@ -181,8 +202,18 @@ func buildMeta(t reflect.Type) (*EntityMeta, error) {
 	}
 
 	// Check for custom table naming interface
+	var customTableName string
+	var hasCustomName bool
 	if tn, ok := reflect.New(t).Interface().(TableNamer); ok {
-		meta.Plural = tn.TableName()
+		customTableName = tn.TableName()
+		hasCustomName = true
+	}
+
+	meta.HasCustomTableName = hasCustomName
+	if hasCustomName {
+		meta.TableName = customTableName
+	} else {
+		meta.TableName = pluralize(t.Name())
 	}
 
 	// Get pooled reflect.Values for field processing
@@ -223,12 +254,7 @@ func buildMeta(t reflect.Type) (*EntityMeta, error) {
 			Generator:  parsedTag.GetGenerator(),
 		}
 
-		// Pre-compile all three setter function variants for different use cases:
-		// SetFunc: Standard reflection-based setter with full error handling
-		// SetFast: Optimized reflection setter for performance-critical paths
 		// DirectSet: Unsafe pointer setter for maximum performance
-		fm.SetFunc = createSetFunc(f.Index, f.Type, f.Name)
-		fm.SetFast = createSetFastFunc(f.Index, f.Type, f.Name)
 		fm.DirectSet = createDirectSetterFunc(f.Offset, f.Type)
 
 		// Build all lookup structures for O(1) field access during scanning
