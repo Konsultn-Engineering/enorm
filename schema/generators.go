@@ -172,7 +172,7 @@ func (r *GeneratorRegistry) Generate(generatorType string) (any, error) {
 	return gen.Generate()
 }
 
-// Global functions for convenience
+// RegisterGenerator functions for convenience
 func RegisterGenerator(name string, generator IDGenerator) {
 	defaultRegistry.Register(name, generator)
 }

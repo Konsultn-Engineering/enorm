@@ -13,20 +13,35 @@ type FieldRegistry interface {
 }
 
 type EntityMeta struct {
-	Type         reflect.Type
-	Name         string
-	Plural       string
-	Fields       []*FieldMeta
-	FieldMap     map[string]*FieldMeta // Go field name -> FieldMeta
-	ColumnMap    map[string]*FieldMeta // Database column name -> FieldMeta (renamed from SnakeMap)
-	ScannerFn    ScannerFunc
-	AliasMapping map[string]string
+	Type                 reflect.Type
+	Name                 string
+	Plural               string
+	Fields               []*FieldMeta
+	FieldMap             map[string]*FieldMeta // Go field name -> FieldMeta
+	ColumnMap            map[string]*FieldMeta // Database column name -> FieldMeta (renamed from SnakeMap)
+	ScannerFn            ScannerFunc
+	AliasMapping         map[string]string
+	preallocatedScanVals []interface{}
+}
+
+// getScanVals returns the pre-allocated slice, resizing if necessary
+func (m *EntityMeta) getScanVals(size int) []interface{} {
+	if cap(m.preallocatedScanVals) < size {
+		m.preallocatedScanVals = make([]interface{}, size)
+	} else {
+		m.preallocatedScanVals = m.preallocatedScanVals[:size]
+	}
+	return m.preallocatedScanVals
 }
 
 // ScanAndSet handles scanning from SQL rows and setting fields using DirectSet
 func (m *EntityMeta) ScanAndSet(dest any, columns []string, scanVals []any) error {
 	structVal := reflect.ValueOf(dest).Elem()
 	structPtr := unsafe.Pointer(structVal.UnsafeAddr())
+
+	// Use pre-allocated slice instead of external scanVals to reduce allocations
+	internalScanVals := m.getScanVals(len(columns))
+	copy(internalScanVals, scanVals)
 
 	for i, col := range columns {
 		fieldMeta := m.ColumnMap[col] // Updated reference
@@ -35,7 +50,7 @@ func (m *EntityMeta) ScanAndSet(dest any, columns []string, scanVals []any) erro
 		}
 
 		// DirectSet now handles all type conversions dynamically
-		fieldMeta.DirectSet(structPtr, scanVals[i])
+		fieldMeta.DirectSet(structPtr, internalScanVals[i])
 	}
 
 	return nil

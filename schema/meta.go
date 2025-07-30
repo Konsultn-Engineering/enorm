@@ -3,6 +3,7 @@ package schema
 import (
 	"fmt"
 	"reflect"
+	"time"
 	"unsafe"
 )
 
@@ -74,8 +75,6 @@ func createSetFastFunc(index []int, fieldType reflect.Type, fieldName string) fu
 
 // createDirectSetterFunc generates the fastest possible setter using unsafe pointers.
 // Bypasses reflection's field lookup by using pre-calculated memory offsets.
-//
-// Performance: ~3x faster than reflection-based setters for simple field access.
 // Safety: Uses unsafe operations - requires careful memory management.
 //
 // Parameters:
@@ -86,12 +85,39 @@ func createSetFastFunc(index []int, fieldType reflect.Type, fieldName string) fu
 func createDirectSetterFunc(offset uintptr, fieldType reflect.Type) func(structPtr unsafe.Pointer, value any) {
 	return func(structPtr unsafe.Pointer, value any) {
 		fieldPtr := unsafe.Add(structPtr, offset)
-		field := reflect.NewAt(fieldType, fieldPtr).Elem()
-
 		actualValue := extractValue(value)
-		val := reflect.ValueOf(actualValue)
 
-		// Now proceed with normal assignment
+		// Fast path for common types - avoid reflection entirely
+		switch fieldType.Kind() {
+		case reflect.Uint64:
+			if v, ok := actualValue.(uint64); ok {
+				*(*uint64)(fieldPtr) = v
+				return
+			}
+		case reflect.String:
+			if v, ok := actualValue.(string); ok {
+				*(*string)(fieldPtr) = v
+				return
+			}
+		case reflect.Int64:
+			if v, ok := actualValue.(int64); ok {
+				*(*int64)(fieldPtr) = v
+				return
+			}
+		case reflect.Struct:
+			if fieldType == reflect.TypeOf(time.Time{}) {
+				if v, ok := actualValue.(time.Time); ok {
+					*(*time.Time)(fieldPtr) = v
+					return
+				}
+			}
+		default:
+			panic("unhandled default case")
+		}
+
+		// Fallback to reflection for complex types
+		field := reflect.NewAt(fieldType, fieldPtr).Elem()
+		val := reflect.ValueOf(actualValue)
 		if val.Type().ConvertibleTo(fieldType) {
 			field.Set(val.Convert(fieldType))
 		} else {
@@ -103,11 +129,10 @@ func createDirectSetterFunc(offset uintptr, fieldType reflect.Type) func(structP
 func extractValue(value any) any {
 	val := reflect.ValueOf(value)
 
-	// Handle *interface{} case
+	// Handle pointer unwrapping efficiently
 	for val.Kind() == reflect.Ptr && !val.IsNil() {
 		elem := val.Elem()
 		if elem.Kind() == reflect.Interface && !elem.IsNil() {
-			// This is *interface{} containing actual value
 			return elem.Interface()
 		}
 		val = elem
@@ -122,9 +147,6 @@ func extractValue(value any) any {
 //
 // This function performs expensive reflection operations once and caches
 // the results to avoid repeated computation during database scanning.
-//
-// Performance impact: Initial cost ~1-5ms per struct type, saves ~50-100μs
-// per row scan operation by pre-compiling all reflection operations.
 //
 // Parameters:
 //   - t: reflect.Type of the struct to analyze (pointer types are dereferenced)
@@ -162,6 +184,10 @@ func buildMeta(t reflect.Type) (*EntityMeta, error) {
 	if tn, ok := reflect.New(t).Interface().(TableNamer); ok {
 		meta.Plural = tn.TableName()
 	}
+
+	// Get pooled reflect.Values for field processing
+	reflectVals := getReflectValues()
+	defer putReflectValues(reflectVals)
 
 	// Process each struct field to build comprehensive metadata
 	for i := 0; i < numFields; i++ {

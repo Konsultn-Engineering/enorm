@@ -28,6 +28,15 @@ var timePool = &sync.Pool{
 	New: func() any { return new(time.Time) },
 }
 
+// 🆕 OPTIMIZATION 1: Pool for reflect.Value slices to avoid allocations in reflection-heavy operations
+// reflectValuePool provides reusable []reflect.Value slices for metadata operations.
+// Pre-sized to 10 elements to handle typical struct field counts without reallocation.
+var reflectValuePool = sync.Pool{
+	New: func() interface{} {
+		return make([]reflect.Value, 0, 10)
+	},
+}
+
 // kindPools maps Go's basic types to their dedicated memory pools.
 // Provides fast O(1) lookup for the most common database column types,
 // avoiding the overhead of sync.Map operations for primitive values.
@@ -112,4 +121,23 @@ func putValuePtr(t reflect.Type, val any) {
 	if poolIface, ok := valuePools.Load(t); ok {
 		poolIface.(*sync.Pool).Put(val)
 	}
+}
+
+// getReflectValues retrieves a pooled []reflect.Value slice for temporary use.
+// Returns an empty slice with pre-allocated capacity to avoid growth allocations.
+func getReflectValues() []reflect.Value {
+	return reflectValuePool.Get().([]reflect.Value)
+}
+
+// putReflectValues returns a used []reflect.Value slice back to the pool.
+// Clears all reflect.Value entries to prevent memory leaks and resets length to 0.
+// MUST be called after reflect.Value operations complete.
+func putReflectValues(vals []reflect.Value) {
+	// Clear all reflect.Value entries to prevent holding references
+	for i := range vals {
+		vals[i] = reflect.Value{}
+	}
+	// Reset length but keep capacity
+	vals = vals[:0]
+	reflectValuePool.Put(vals)
 }
