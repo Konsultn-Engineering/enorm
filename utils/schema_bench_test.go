@@ -1,6 +1,7 @@
-package schema
+package utils
 
 import (
+	"github.com/Konsultn-Engineering/enorm/schema"
 	"reflect"
 	"testing"
 	"time"
@@ -15,8 +16,8 @@ type TestUser struct {
 }
 
 type mockRowScanner struct {
-	columns []string
-	values  []any
+	columns    []string
+	values     []any
 	scanCalled bool
 }
 
@@ -37,14 +38,14 @@ func (m *mockRowScanner) Columns() ([]string, error) {
 
 func BenchmarkSchemaScanning(b *testing.B) {
 	// Register scanner
-	RegisterScanner(TestUser{}, func(a any, scanner FieldRegistry) error {
+	schema.RegisterScanner(TestUser{}, func(a any, scanner schema.FieldRegistry) error {
 		u := a.(*TestUser)
 		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt)
 	})
 
 	// Get scanner function
 	t := reflect.TypeOf(TestUser{})
-	scannerFn := getRegisteredScanner(t)
+	scannerFn := schema.getRegisteredScanner(t)
 
 	row := &mockRowScanner{
 		columns: []string{"id", "first_name", "email", "created_at", "updated_at"},
@@ -52,7 +53,7 @@ func BenchmarkSchemaScanning(b *testing.B) {
 	}
 
 	user := &TestUser{}
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		scannerFn(user, row)

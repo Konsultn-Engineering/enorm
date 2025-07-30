@@ -6,9 +6,31 @@ import (
 	"time"
 )
 
-var valuePools sync.Map // map[reflect.Type]*sync.Pool
-var byteSlicePool = &sync.Pool{New: func() any { b := make([]byte, 0, 64); return &b }}
-var timePool = &sync.Pool{New: func() any { return new(time.Time) }}
+// valuePools maintains dynamic pools for complex types that don't have dedicated pools.
+// Used as fallback when kindPools doesn't contain a specific reflect.Type.
+// Key: reflect.Type, Value: *sync.Pool for that type.
+var valuePools sync.Map
+
+// byteSlicePool provides reusable byte slices for []byte columns (BLOB, TEXT, etc.).
+// Pre-allocated with 64-byte capacity to handle most common database field sizes
+// without additional allocations during append operations.
+var byteSlicePool = &sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 128)
+		return &b
+	},
+}
+
+// timePool provides reusable time.Time instances for temporal database columns.
+// Specialized pool since time.Time is extremely common in database schemas
+// and has significant allocation overhead when created repeatedly.
+var timePool = &sync.Pool{
+	New: func() any { return new(time.Time) },
+}
+
+// kindPools maps Go's basic types to their dedicated memory pools.
+// Provides fast O(1) lookup for the most common database column types,
+// avoiding the overhead of sync.Map operations for primitive values.
 var kindPools = map[reflect.Kind]*sync.Pool{
 	reflect.Int:     {New: func() any { return new(int) }},
 	reflect.Int8:    {New: func() any { return new(int8) }},
@@ -26,50 +48,67 @@ var kindPools = map[reflect.Kind]*sync.Pool{
 	reflect.String:  {New: func() any { return new(string) }},
 }
 
+// getValuePtr retrieves a pooled pointer value for the specified type.
+// Uses a three-tier lookup strategy: special cases, kind pools, then dynamic pools.
+// Returns a pointer to zero-value instance ready for database scanning.
+//
+// Performance hierarchy:
+//  1. Special cases ([]byte, time.Time) - fastest, direct pool access
+//  2. Kind pools - fast map lookup for primitives
+//  3. Dynamic pools - slower sync.Map for complex types
 func getValuePtr(t reflect.Type) any {
-	// Special cases first
-	if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 {
-		return byteSlicePool.Get()
-	}
-	if t.Kind() == reflect.Struct && t.String() == "time.Time" {
+	// Tier 1: Special cases with dedicated pools (fastest path)
+	switch {
+	case t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8:
+		ptr := byteSlicePool.Get().(*[]byte)
+		*ptr = (*ptr)[:0] // Reset length but keep capacity
+		return ptr
+	case t.Kind() == reflect.Struct && t == reflect.TypeOf(time.Time{}): // More efficient comparison
 		return timePool.Get()
 	}
 
-	// General case
-	if pool, ok := kindPools[t.Kind()]; ok {
+	// Tier 2: Kind-based pools for primitives (fast map lookup)
+	if pool, exists := kindPools[t.Kind()]; exists {
 		return pool.Get()
 	}
 
-	// Fallback to reflect-based pooling
-	poolIface, ok := valuePools.Load(t)
-	if !ok {
-		poolIface, _ = valuePools.LoadOrStore(t, &sync.Pool{
-			New: func() any {
-				return reflect.New(t).Interface()
-			},
-		})
-	}
+	// Tier 3: Dynamic pooling for complex types (slower but necessary)
+	poolIface, _ := valuePools.LoadOrStore(t, &sync.Pool{
+		New: func() any {
+			return reflect.New(t).Interface()
+		},
+	})
 	return poolIface.(*sync.Pool).Get()
 }
 
+// putValuePtr returns a used value pointer back to its appropriate pool for reuse.
+// Must be called after scanning operations complete to prevent memory leaks
+// and maintain pool efficiency. Follows same lookup hierarchy as getValuePtr.
+//
+// Critical for performance: failure to call this results in pool depletion
+// and falls back to regular allocations, negating pooling benefits.
 func putValuePtr(t reflect.Type, val any) {
-	// Special cases
-	if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 {
+	// Tier 1: Special cases (fastest return path)
+	switch {
+	case t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8:
 		byteSlicePool.Put(val)
 		return
-	}
-	if t.Kind() == reflect.Struct && t.String() == "time.Time" {
+	case t.Kind() == reflect.Struct && t == reflect.TypeOf(time.Time{}):
+		// Reset time value to zero before returning to pool
+		if timePtr, ok := val.(*time.Time); ok {
+			*timePtr = time.Time{}
+		}
 		timePool.Put(val)
 		return
 	}
 
-	// General case
-	if pool, ok := kindPools[t.Kind()]; ok {
+	// Tier 2: Kind-based pools
+	if pool, exists := kindPools[t.Kind()]; exists {
 		pool.Put(val)
 		return
 	}
 
-	// Fallback
+	// Tier 3: Dynamic pools
 	if poolIface, ok := valuePools.Load(t); ok {
 		poolIface.(*sync.Pool).Put(val)
 	}

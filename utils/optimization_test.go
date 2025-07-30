@@ -1,7 +1,8 @@
-package schema
+package utils
 
 import (
 	"fmt"
+	"github.com/Konsultn-Engineering/enorm/schema"
 	"reflect"
 	"testing"
 	"time"
@@ -10,14 +11,14 @@ import (
 // Comparison test to demonstrate optimization improvements
 func TestOptimizationComparison(t *testing.T) {
 	// Test setup identical to benchmark
-	RegisterScanner(TestUser{}, func(a any, scanner FieldRegistry) error {
+	schema.RegisterScanner(TestUser{}, func(a any, scanner schema.FieldRegistry) error {
 		u := a.(*TestUser)
 		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt)
 	})
 
 	// Get scanner function
 	scannerType := reflect.TypeOf(TestUser{})
-	scannerFn := getRegisteredScanner(scannerType)
+	scannerFn := schema.getRegisteredScanner(scannerType)
 
 	row := &mockRowScanner{
 		columns: []string{"id", "first_name", "email", "created_at", "updated_at"},
@@ -25,7 +26,7 @@ func TestOptimizationComparison(t *testing.T) {
 	}
 
 	user := &TestUser{}
-	
+
 	// Test that scanning works correctly
 	err := scannerFn(user, row)
 	if err != nil {

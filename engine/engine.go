@@ -10,8 +10,6 @@ import (
 	"reflect"
 	"strings"
 	"sync"
-	"time"
-	"unsafe"
 )
 
 type Engine struct {
@@ -102,45 +100,10 @@ func (e *Engine) FindOne(dest any) (string, error) {
 		return "", err
 	}
 
-	// Apply scanned values using DirectSet
-	structVal := reflect.ValueOf(dest).Elem()
-	structPtr := unsafe.Pointer(structVal.UnsafeAddr())
-
-	for i, col := range columns {
-		fieldMeta := meta.SnakeMap[col]
-		if fieldMeta == nil {
-			continue // ignore unmapped fields
-		}
-
-		raw := *(scanVals[i].(*any))
-
-		switch fieldMeta.Type.Kind() {
-		case reflect.Uint64:
-			if v, ok := raw.(int64); ok {
-				tmp := uint64(v)
-				fieldMeta.DirectSet(structPtr, &tmp)
-				continue
-			}
-		case reflect.Int64:
-			if v, ok := raw.(int64); ok {
-				fieldMeta.DirectSet(structPtr, &v)
-				continue
-			}
-		case reflect.String:
-			if v, ok := raw.(string); ok {
-				fieldMeta.DirectSet(structPtr, &v)
-				continue
-			}
-		case reflect.Struct:
-			if fieldMeta.Type.String() == "time.Time" {
-				if v, ok := raw.(time.Time); ok {
-					fieldMeta.DirectSet(structPtr, &v)
-					continue
-				}
-			}
-		}
-
-		fieldMeta.DirectSet(structPtr, &raw)
+	// Use EntityMeta to handle the setting
+	err = meta.ScanAndSet(dest, columns, scanVals)
+	if err != nil {
+		return "", err
 	}
 
 	return query, nil
