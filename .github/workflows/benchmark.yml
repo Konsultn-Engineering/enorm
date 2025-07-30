@@ -42,8 +42,14 @@ jobs:
             sleep 3
           done
 
-      - name: Run benchmarks
-        run: go test -bench=. -benchmem -run=^$ ./engine | tee bench.txt
+      - name: Run Benchmarks
+        run: |
+          cd engine  
+          go test -bench=. -benchmem -count=5 -run=^$ . | tee bench.txt
+          
+          # Optional: Statistical analysis
+          go install golang.org/x/perf/cmd/benchstat@latest
+          benchstat bench.txt
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
