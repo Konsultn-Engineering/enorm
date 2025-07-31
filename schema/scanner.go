@@ -26,11 +26,19 @@ var (
 			return make([]colBind, 0, 32) // Increased default size
 		},
 	}
+
 	destsPool = sync.Pool{
 		New: func() any {
-			return make([]any, 0, 32) // Increased default size
+			return make([]any, 0, 32)
 		},
 	}
+
+	largeDstsPool = sync.Pool{
+		New: func() any {
+			return make([]any, 0, 128)
+		},
+	}
+
 	// Pre-allocated dummy for unbound columns
 	globalDummy = new(any)
 )
@@ -78,13 +86,51 @@ func wrapScanner(fn func(any, FieldRegistry) error) ScannerFunc {
 		colBinds = colBinds[:0] // Reset but keep capacity
 		defer colBindsPool.Put(colBinds)
 
-		dests := destsPool.Get().([]any)
-		if cap(dests) < len(columns) {
+		// Optimized slice allocation with smart pool selection
+		var dests []any
+		var useSmallPool bool
+
+		if len(columns) <= 32 {
+			dests = destsPool.Get().([]any)
+			useSmallPool = true
+		} else if len(columns) <= 128 {
+			dests = largeDstsPool.Get().([]any)
+			useSmallPool = false
+		} else {
+			// For very large column counts, allocate directly
 			dests = make([]any, len(columns))
+			defer func() { /* no pooling for oversized slices */ }()
+			goto skipDefer
+		}
+
+		if cap(dests) < len(columns) {
+			// Return undersized slice, get appropriate size
+			if useSmallPool {
+				destsPool.Put(dests)
+				dests = make([]any, len(columns), max(len(columns)*2, 32))
+			} else {
+				largeDstsPool.Put(dests)
+				dests = make([]any, len(columns), max(len(columns)*2, 128))
+			}
+			defer func() {
+				if cap(dests) <= 32 {
+					destsPool.Put(dests[:0])
+				} else if cap(dests) <= 128 {
+					largeDstsPool.Put(dests[:0])
+				}
+			}()
 		} else {
 			dests = dests[:len(columns)]
+			defer func() {
+				if useSmallPool {
+					destsPool.Put(dests)
+				} else {
+					largeDstsPool.Put(dests)
+				}
+			}()
 		}
-		defer destsPool.Put(dests)
+
+	skipDefer:
 
 		// Single pass: build bindings and destinations simultaneously
 		boundCount := 0
@@ -142,4 +188,13 @@ func getRegisteredScanner(t reflect.Type) ScannerFunc {
 		return v.(ScannerFunc)
 	}
 	return nil
+}
+
+// max returns the larger of two integers.
+// Helper function for capacity calculations in pool management.
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

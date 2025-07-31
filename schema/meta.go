@@ -1,166 +1,109 @@
 package schema
 
 import (
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"reflect"
+	"sync"
 	"time"
 	"unsafe"
 )
 
-// createSetFunc generates a reflection-based setter function for struct fields.
-// Uses FieldByIndex for direct field access and handles type conversions.
-// Slower than createSetFastFunc but more flexible for complex nested fields.
-//
-// Parameters:
-//   - index: Field index path for nested struct navigation
-//   - fieldType: Target field's reflect.Type for conversion validation
-//   - fieldName: Field name for debugging (currently unused but kept for future error reporting)
-//
-// Returns: Optimized setter function with pre-compiled field access path
-func createSetFunc(index []int, fieldType reflect.Type, fieldName string) func(model any, val any) {
-	// Pre-compute index slice to avoid repeated allocations
-	fieldIndex := make([]int, len(index))
-	copy(fieldIndex, index)
+var setterCreators = sync.Map{}
 
-	return func(model any, val any) {
-		field := reflect.ValueOf(model).Elem().FieldByIndex(fieldIndex)
-		v := reflect.ValueOf(val)
+func registerSetterCreator[T any]() {
+	var zero T
+	zeroType := reflect.TypeOf(zero)
 
-		// Fast path: direct assignment if types match exactly
-		if v.Type() == fieldType {
-			field.Set(v)
-			return
+	// Pre-cache common converter types at registration time
+	commonConverters := make(map[reflect.Type]func(any) (T, error), 8)
+
+	setterCreators.Store(zeroType, func(offset uintptr) func(unsafe.Pointer, any) {
+		return func(structPtr unsafe.Pointer, value any) {
+			fieldPtr := (*T)(unsafe.Add(structPtr, offset))
+
+			if value == nil {
+				*fieldPtr = zero
+				return
+			}
+
+			actualValue := value
+			var actualValueType reflect.Type
+
+			if val := reflect.ValueOf(value); val.Kind() == reflect.Ptr && !val.IsNil() {
+				actualValue = val.Elem().Interface()
+				actualValueType = val.Type().Elem() // Use val.Type() instead of new TypeOf call
+			} else {
+				actualValueType = reflect.TypeOf(value)
+			}
+
+			// Check cached converters first
+			if cachedConverter, exists := commonConverters[actualValueType]; exists {
+				*fieldPtr, _ = cachedConverter(actualValue)
+				return
+			}
+
+			// Fallback to GetConverter and cache the result
+			converter, err := GetConverter(zero, actualValueType)
+			if err != nil {
+				panic(err)
+			}
+
+			// Cache this converter for future use
+			if len(commonConverters) < 16 { // Limit cache size
+				commonConverters[actualValueType] = func(v any) (T, error) {
+					result, err := converter(v)
+					return result, err
+				}
+			}
+
+			*fieldPtr, _ = converter(actualValue)
 		}
-
-		// Conversion path: check convertibility then convert
-		if v.Type().ConvertibleTo(fieldType) {
-			field.Set(v.Convert(fieldType))
-		} else {
-			// Consider returning error instead of panic for production use
-			panic(fmt.Sprintf("type mismatch: cannot convert %v to %v for field %s",
-				v.Type(), fieldType, fieldName))
-		}
-	}
+	})
+}
+func init() {
+	registerSetterCreator[int64]()
+	registerSetterCreator[uint64]()
+	registerSetterCreator[string]()
+	registerSetterCreator[*string]()
+	registerSetterCreator[bool]()
+	registerSetterCreator[float64]()
+	registerSetterCreator[time.Time]()
+	registerSetterCreator[[]byte]()
+	registerSetterCreator[json.RawMessage]()
+	registerSetterCreator[[]float32]() // Vectors
+	registerSetterCreator[sql.NullString]()
+	registerSetterCreator[sql.NullTime]()
 }
 
-// createSetFastFunc generates an optimized setter function with direct field access.
-// Similar to createSetFunc but optimized for simpler use cases with better performance.
-// Preferred over createSetFunc when field access patterns are straightforward.
-//
-// Performance: ~20% faster than createSetFunc due to streamlined reflection operations.
-func createSetFastFunc(index []int, fieldType reflect.Type, fieldName string) func(ptr any, raw any) {
-	// Pre-compile field index to avoid slice allocations during calls
-	fieldIndex := make([]int, len(index))
-	copy(fieldIndex, index)
-
-	return func(ptr any, raw any) {
-		dst := reflect.ValueOf(ptr).Elem().FieldByIndex(fieldIndex)
-		src := reflect.ValueOf(raw)
-
-		// Optimized type checking with early return
-		srcType := src.Type()
-		if srcType == fieldType {
-			dst.Set(src)
-			return
-		}
-
-		if srcType.ConvertibleTo(fieldType) {
-			dst.Set(src.Convert(fieldType))
-		} else {
-			panic(fmt.Sprintf("type mismatch in SetFast: cannot convert %v to %v for field %s",
-				srcType, fieldType, fieldName))
-		}
+func createDirectSetterForType(fieldType reflect.Type, offset uintptr) func(unsafe.Pointer, any) {
+	if creator, ok := setterCreators.Load(fieldType); ok {
+		return creator.(func(uintptr) func(unsafe.Pointer, any))(offset)
 	}
-}
 
-// createDirectSetterFunc generates the fastest possible setter using unsafe pointers.
-// Bypasses reflection's field lookup by using pre-calculated memory offsets.
-// Safety: Uses unsafe operations - requires careful memory management.
-//
-// Parameters:
-//   - offset: Pre-calculated byte offset of field within struct
-//   - fieldType: Field type for creating proper reflect.Value at memory location
-//
-// Returns: Ultra-fast setter function using direct memory access
-func createDirectSetterFunc(offset uintptr, fieldType reflect.Type) func(structPtr unsafe.Pointer, value any) {
-	fieldKind := fieldType.Kind()
-
-	// Pre-compute type checks to avoid runtime reflection
-	isTimeType := fieldType == reflect.TypeOf(time.Time{})
-
+	// Fallback for unregistered types - uses reflection
 	return func(structPtr unsafe.Pointer, value any) {
-		fieldPtr := unsafe.Add(structPtr, offset)
-
-		// Eliminate extractValue() call overhead for common cases
-		switch fieldKind {
-		case reflect.Uint64:
-			if v, ok := value.(uint64); ok {
-				*(*uint64)(fieldPtr) = v
-				return
-			}
-			// Handle pointer unwrapping only when needed
-			if pv, ok := value.(*uint64); ok && pv != nil {
-				*(*uint64)(fieldPtr) = *pv
-				return
-			}
-		case reflect.String:
-			if v, ok := value.(string); ok {
-				*(*string)(fieldPtr) = v
-				return
-			}
-			if pv, ok := value.(*string); ok && pv != nil {
-				*(*string)(fieldPtr) = *pv
-				return
-			}
-		case reflect.Int64:
-			if v, ok := value.(int64); ok {
-				*(*int64)(fieldPtr) = v
-				return
-			}
-			if pv, ok := value.(*int64); ok && pv != nil {
-				*(*int64)(fieldPtr) = *pv
-				return
-			}
-		case reflect.Struct:
-			if isTimeType {
-				if v, ok := value.(time.Time); ok {
-					*(*time.Time)(fieldPtr) = v
-					return
-				}
-				if pv, ok := value.(*time.Time); ok && pv != nil {
-					*(*time.Time)(fieldPtr) = *pv
-					return
-				}
-			}
-		default:
-			panic("unhandled default case")
+		targetValue := reflect.NewAt(fieldType, unsafe.Add(structPtr, offset)).Elem()
+		if value == nil {
+			targetValue.Set(reflect.Zero(fieldType))
+			return
 		}
 
-		// Fallback to reflection for complex types (minimize this path)
-		actualValue := extractValue(value)
-		field := reflect.NewAt(fieldType, fieldPtr).Elem()
-		val := reflect.ValueOf(actualValue)
-
-		if val.Type().ConvertibleTo(fieldType) {
-			field.Set(val.Convert(fieldType))
-		} else {
-			field.Set(val)
+		actualValue := value
+		if val := reflect.ValueOf(value); val.Kind() == reflect.Ptr && !val.IsNil() {
+			actualValue = val.Elem().Interface()
+			val = reflect.ValueOf(actualValue)
+			if val.Type().ConvertibleTo(fieldType) {
+				targetValue.Set(val.Convert(fieldType))
+				return
+			}
 		}
+
+		converter, _ := GetConverter(reflect.New(fieldType).Elem().Interface(), reflect.TypeOf(actualValue))
+		converted, _ := converter(actualValue)
+		targetValue.Set(reflect.ValueOf(converted))
 	}
-}
-func extractValue(value any) any {
-	val := reflect.ValueOf(value)
-
-	// Handle pointer unwrapping efficiently
-	for val.Kind() == reflect.Ptr && !val.IsNil() {
-		elem := val.Elem()
-		if elem.Kind() == reflect.Interface && !elem.IsNil() {
-			return elem.Interface()
-		}
-		val = elem
-	}
-
-	return value
 }
 
 // buildMeta constructs comprehensive metadata for a struct type, including
@@ -190,15 +133,21 @@ func buildMeta(t reflect.Type) (*EntityMeta, error) {
 
 	// Pre-allocate maps with estimated capacity to reduce rehashing
 	numFields := t.NumField()
-	estimatedExportedFields := numFields * 3 / 4 // Estimate ~75% fields are exported
+
+	exportedCount := 0
+	for i := 0; i < numFields; i++ {
+		if t.Field(i).IsExported() && !t.Field(i).Anonymous {
+			exportedCount++
+		}
+	}
 
 	meta := &EntityMeta{
 		Type:         t,
 		Name:         t.Name(),
-		Fields:       make([]*FieldMeta, 0, estimatedExportedFields),
-		FieldMap:     make(map[string]*FieldMeta, estimatedExportedFields),
-		ColumnMap:    make(map[string]*FieldMeta, estimatedExportedFields),
-		AliasMapping: make(map[string]string, estimatedExportedFields),
+		Fields:       make([]*FieldMeta, 0, exportedCount),
+		FieldMap:     make(map[string]*FieldMeta, exportedCount),
+		ColumnMap:    make(map[string]*FieldMeta, exportedCount),
+		AliasMapping: make(map[string]string, exportedCount),
 	}
 
 	// Check for custom table naming interface
@@ -254,8 +203,7 @@ func buildMeta(t reflect.Type) (*EntityMeta, error) {
 			Generator:  parsedTag.GetGenerator(),
 		}
 
-		// DirectSet: Unsafe pointer setter for maximum performance
-		fm.DirectSet = createDirectSetterFunc(f.Offset, f.Type)
+		fm.DirectSet = createDirectSetterForType(f.Type, f.Offset)
 
 		// Build all lookup structures for O(1) field access during scanning
 		meta.Fields = append(meta.Fields, fm)

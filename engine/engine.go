@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"unsafe"
 )
 
 type Engine struct {
@@ -65,8 +66,18 @@ func (e *Engine) FindOne(dest any) (string, error) {
 		return "", err
 	}
 
+	cols := []string{"id", "first_name", "email", "created_at", "updated_at"}
+
+	// Pre-resolve setters once (eliminates runtime map lookups)
+	setters := make([]func(unsafe.Pointer, any), len(cols))
+	for i, col := range cols {
+		if fieldMeta, exists := meta.ColumnMap[col]; exists {
+			setters[i] = fieldMeta.DirectSet
+		}
+	}
+
 	selectStmt := &ast.SelectStmt{
-		Columns: e.astFromCols([]string{"id"}), // or build dynamically from meta.Fields
+		Columns: e.astFromCols(cols),
 		From:    &ast.Table{Name: meta.TableName},
 		Limit:   &ast.LimitClause{Count: ptr(1)},
 	}
@@ -86,24 +97,26 @@ func (e *Engine) FindOne(dest any) (string, error) {
 		return "", sql.ErrNoRows
 	}
 
-	// Create temporary holders for scanned values
-	columns := []string{"id"} // this should match astFromCols
-	scanVals := make([]any, len(columns))
-	for i := range scanVals {
-		var tmp any
-		scanVals[i] = &tmp
+	// Optimized scanning - single allocation
+	scanVals := make([]any, len(cols))
+	scanPtrs := make([]any, len(cols))
+	for i := range cols {
+		scanPtrs[i] = &scanVals[i]
 	}
 
-	// Perform the scan
-	err = rows.Scan(scanVals...)
+	err = rows.Scan(scanPtrs...)
 	if err != nil {
 		return "", err
 	}
 
-	// Use EntityMeta to handle the setting
-	err = meta.ScanAndSet(dest, columns, scanVals)
-	if err != nil {
-		return "", err
+	// Fast struct pointer extraction (eliminates reflection)
+	structPtr := unsafe.Pointer(reflect.ValueOf(dest).Pointer())
+
+	// Direct setting with pre-resolved setters (no lookups)
+	for i, setter := range setters {
+		if setter != nil {
+			setter(structPtr, scanVals[i])
+		}
 	}
 
 	return query, nil

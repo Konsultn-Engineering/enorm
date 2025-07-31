@@ -2,12 +2,7 @@ package main
 
 import (
 	"github.com/Konsultn-Engineering/enorm/ast"
-	"github.com/Konsultn-Engineering/enorm/cache"
-	"github.com/Konsultn-Engineering/enorm/dialect"
 	_ "github.com/Konsultn-Engineering/enorm/providers/postgres"
-	"github.com/Konsultn-Engineering/enorm/visitor"
-	"log"
-	"testing"
 	"time"
 )
 
@@ -20,7 +15,7 @@ type User struct {
 }
 
 func test() {
-	selectStmt := ast.SelectStmt{
+	_ = ast.SelectStmt{
 		Columns: []ast.Node{
 			&ast.Column{Name: "id"},
 			&ast.Column{Name: "name"},
@@ -93,39 +88,30 @@ func test() {
 	//	},
 	//}
 
-	c := cache.NewQueryCache() // your real cache instance
-	d := dialect.NewTiDBDialect()
-	v := visitor.NewSQLVisitor(d, c)
+	//c := cache.NewQueryCache() // your real cache instance
+	//d := dialect.NewTiDBDialect()
+	//v := visitor.NewSQLVisitor(d, c)
+	//
+	//fp := selectStmt.Fingerprint()
+	//
+	//// First access: should MISS
+	//if cached, ok := c.GetSQL(fp); ok {
+	//	log.Println("CACHE HIT:", cached.SQL)
+	//} else {
+	//	sql, args, err := v.Build(&selectStmt)
+	//	if err != nil {
+	//		log.Fatal(err)
+	//	}
+	//	c.SetSQL(fp, &cache.CachedQuery{SQL: sql})
+	//	log.Println("CACHE MISS -> COMPUTED:", sql)
+	//	log.Println("ARGS:", args)
+	//}
+	//
+	//// Second access: should HIT
+	//if cached, ok := c.GetSQL(fp); ok {
+	//	log.Println("RECONFIRM HIT:", cached.SQL, cached.ArgsOrder)
+	//} else {
+	//	log.Println("UNEXPECTED MISS")
+	//}
 
-	fp := selectStmt.Fingerprint()
-
-	// First access: should MISS
-	if cached, ok := c.GetSQL(fp); ok {
-		log.Println("CACHE HIT:", cached.SQL)
-	} else {
-		sql, args, err := v.Build(&selectStmt)
-		if err != nil {
-			log.Fatal(err)
-		}
-		c.SetSQL(fp, &cache.CachedQuery{SQL: sql})
-		log.Println("CACHE MISS -> COMPUTED:", sql)
-		log.Println("ARGS:", args)
-	}
-
-	// Second access: should HIT
-	if cached, ok := c.GetSQL(fp); ok {
-		log.Println("RECONFIRM HIT:", cached.SQL, cached.ArgsOrder)
-	} else {
-		log.Println("UNEXPECTED MISS")
-	}
-
-}
-
-func main() {
-}
-
-func BenchAst(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		test()
-	}
 }

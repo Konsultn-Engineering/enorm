@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"github.com/Konsultn-Engineering/enorm/schema"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"runtime"
 	"testing"
 	"time"
@@ -69,34 +68,34 @@ func BenchmarkFindOne(b *testing.B) {
 	b.ReportAllocs()
 }
 
-func BenchmarkPGXRawScan(b *testing.B) {
-	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, "postgres://postgres:admin@localhost:5432/enorm_test?sslmode=disable")
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer pool.Close()
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		var id int
-		//var username, email string
-		err := pool.QueryRow(ctx, `SELECT id FROM users LIMIT 1`).Scan(&id)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkBareQuery(b *testing.B) {
-	ctx := context.Background()
-	pool, _ := pgxpool.New(ctx, "postgres://postgres:admin@localhost:5432/enorm_test?sslmode=disable")
-	defer pool.Close()
-
-	query := `SELECT 1`
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		var x int
-		_ = pool.QueryRow(ctx, query).Scan(&x)
-	}
-}
+//func BenchmarkPGXRawScan(b *testing.B) {
+//	ctx := context.Background()
+//	pool, err := pgxpool.New(ctx, "postgres://postgres:admin@localhost:5432/enorm_test?sslmode=disable")
+//	if err != nil {
+//		b.Fatal(err)
+//	}
+//	defer pool.Close()
+//
+//	b.ResetTimer()
+//	for i := 0; i < b.N; i++ {
+//		var id int
+//		//var username, email string
+//		err := pool.QueryRow(ctx, `SELECT id FROM users LIMIT 1`).Scan(&id)
+//		if err != nil {
+//			b.Fatal(err)
+//		}
+//	}
+//}
+//
+//func BenchmarkBareQuery(b *testing.B) {
+//	ctx := context.Background()
+//	pool, _ := pgxpool.New(ctx, "postgres://postgres:admin@localhost:5432/enorm_test?sslmode=disable")
+//	defer pool.Close()
+//
+//	query := `SELECT 1`
+//	b.ResetTimer()
+//	for i := 0; i < b.N; i++ {
+//		var x int
+//		_ = pool.QueryRow(ctx, query).Scan(&x)
+//	}
+//}

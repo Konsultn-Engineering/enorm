@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"reflect"
 	"sync"
-	"unsafe"
 )
 
 // registryPool maintains reusable fieldRegistry instances to minimize allocations
@@ -67,53 +66,45 @@ func (f *fieldRegistry) Bind(entity any, fields ...any) error {
 		return err
 	}
 
-	// Pre-allocate if we know we'll exceed current capacity
-	if len(f.binds)+len(fields) > len(f.binds)*2 {
-		newBinds := make(map[string]func(entity any, val any), len(f.binds)+len(fields))
+	// Pre-allocate larger map if needed to reduce rehashing
+	expectedSize := len(f.binds) + len(fields)
+	if expectedSize > len(f.binds)*2 { // Simple growth heuristic
+		newBinds := make(map[string]func(entity any, val any), expectedSize)
 		for k, v := range f.binds {
 			newBinds[k] = v
 		}
 		f.binds = newBinds
 	}
 
-	// Cache struct field count to avoid repeated calls
-	numFields := structVal.NumField()
+	// Use pointer arithmetic instead of linear search
+	basePtr := structVal.UnsafeAddr()
 
-	// Optimized field matching with early termination
 	for _, fieldPtr := range fields {
-		ptrVal := reflect.ValueOf(fieldPtr)
-		if ptrVal.Kind() != reflect.Ptr {
-			return fmt.Errorf("bind field must be pointer")
-		}
-
-		fieldInterface := fieldPtr
+		ptrAddr := reflect.ValueOf(fieldPtr).Pointer()
 		found := false
 
-		// Linear search with early break - most structs have < 20 fields
-		for i := 0; i < numFields; i++ {
-			field := structVal.Field(i)
-			if field.CanAddr() && field.Addr().Interface() == fieldInterface {
-				structField := structType.Field(i)
-				fieldName := structField.Name
-				dbName := formatName(fieldName)
-
-				// Direct map lookup - already cached from Introspect()
-				if fm, exists := meta.FieldMap[fieldName]; exists && fm.DirectSet != nil {
-					// Create a wrapper that converts the signature
-					f.binds[dbName] = func(model any, val any) {
-						structVal := reflect.ValueOf(model).Elem()
-						structPtr := unsafe.Pointer(structVal.UnsafeAddr())
-						fm.DirectSet(structPtr, val)
+		// Fast offset-based lookup instead of reflection
+		for _, fm := range meta.Fields {
+			if fm.IsExported {
+				fieldAddr := basePtr + fm.Offset
+				if fieldAddr == ptrAddr {
+					if fm.DirectSet != nil {
+						// Create a wrapper that adapts DirectSet to the expected signature
+						directSet := fm.DirectSet
+						f.binds[fm.DBName] = func(entity any, val any) {
+							entityPtr := reflect.ValueOf(entity).UnsafePointer()
+							directSet(entityPtr, val)
+						}
+						found = true
+						break
 					}
-					found = true
-					break
+					return fmt.Errorf("no DirectSet for field %s", fm.Name)
 				}
-				return fmt.Errorf("no Setter for field %s", fieldName)
 			}
 		}
 
 		if !found {
-			return fmt.Errorf("bind field not found in struct: maybe not a field of the supplied structPtr")
+			return fmt.Errorf("bind field not found in struct")
 		}
 	}
 	return nil

@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"github.com/Konsultn-Engineering/enorm/schema"
 	"reflect"
 	"time"
 )
@@ -17,22 +16,11 @@ type Users struct {
 
 func main() {
 	u := &Users{}
-
-	schema.New(2000, nil)
-
-	meta, _ := schema.Introspect(reflect.TypeOf(u))
-	fmt.Println("Entity Name:", meta.Name)
-	fmt.Println("Fields:", meta.Fields)
-	for _, field := range meta.Fields {
-		fmt.Printf("Field: %s, DB Name: %s, Type: %s\n", field.Name, field.DBName, field.Type)
-		if field.Generator != nil {
-			fmt.Println(field.Generator.Generate())
-		}
+	structType := reflect.TypeOf(*u)
+	for i := 0; i < structType.NumField(); i++ {
+		field := structType.Field(i)
+		fmt.Printf("Field %d: %s, Type: %s, Tag: %s\n", i, field.Name, field.Type, field.Tag)
+		fmt.Println("new ref", reflect.TypeOf(reflect.New(field.Type).Elem().Interface()))
 	}
-
-	converter, err := schema.GetConverter[uint64](reflect.TypeOf(""), reflect.TypeOf(uint64(123)))
-	if err != nil {
-	}
-	converted, _ := converter("123")
-	fmt.Println("Converter for string to uint64:", converted)
+	fmt.Println(structType)
 }
