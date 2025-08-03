@@ -21,7 +21,7 @@ import (
 //
 // This is a simplified, cleaner version that focuses on core functionality
 // without the confusing multiple setter variants.
-func buildMeta(t reflect.Type) (*EntityMeta, error) {
+func (ctx *Context) buildMeta(t reflect.Type) (*EntityMeta, error) {
 	// Normalize pointer types
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
@@ -54,11 +54,11 @@ func buildMeta(t reflect.Type) (*EntityMeta, error) {
 	if tn, ok := reflect.New(t).Interface().(TableNamer); ok {
 		meta.TableName = tn.TableName() // Ensure consistency
 	} else {
-		meta.TableName = schemaContext.namingStrategy.TableName(t.Name()) // Use normalize function
+		meta.TableName = ctx.namingStrategy.TableName(t.Name()) // Use context naming strategy
 	}
 
-	// Initialize tag parser
-	parser := NewTagParser(schemaContext.namingStrategy)
+	// Initialize tag parser with context naming strategy
+	parser := NewTagParser(ctx.namingStrategy)
 
 	// Process each field
 	for i := 0; i < numFields; i++ {
@@ -95,7 +95,7 @@ func buildMeta(t reflect.Type) (*EntityMeta, error) {
 
 		// Set default column name if not specified
 		if fm.DBName == "" {
-			fm.DBName = schemaContext.namingStrategy.ColumnName(parsedTag.ColumnName) // Ensure consistency
+			fm.DBName = ctx.namingStrategy.ColumnName(parsedTag.ColumnName) // Use context naming strategy
 		}
 
 		// Create optimized setter (ONLY ONE TYPE - no confusion)

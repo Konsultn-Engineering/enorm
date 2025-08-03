@@ -24,9 +24,10 @@ type RowScanner interface {
 // Parameters:
 //   - dest: Destination struct to populate
 //   - scanner: Database row scanner (sql.Rows, sql.Row, etc.)
+//   - ctx: Schema context for introspection and configuration
 //
 // Returns: Error if scanning fails
-type ScannerFunc func(dest any, scanner RowScanner) error
+type ScannerFunc func(dest any, scanner RowScanner, ctx *Context) error
 
 // ScanConfig provides configuration options for scanning behavior
 type ScanConfig struct {
@@ -54,9 +55,9 @@ type colBind struct {
 // Use for complex types requiring specialized deserialization, custom validation,
 // or performance optimization beyond the default scanning pipeline.
 //
-// The custom scanner function receives the target struct and a FieldBinder to
-// establish column-to-field mappings. This allows fine-grained control over
-// which fields are bound and how values are processed.
+// The custom scanner function receives the target struct, a FieldBinder to
+// establish column-to-field mappings, and the schema context for configuration.
+// This allows fine-grained control over which fields are bound and how values are processed.
 //
 // Parameters:
 //   - entity: Zero-value instance of the target struct type
@@ -64,7 +65,7 @@ type colBind struct {
 //
 // Example:
 //
-//	RegisterScanner(User{}, func(target any, binder FieldBinder) error {
+//	RegisterScanner(User{}, func(target any, binder FieldBinder, ctx *Context) error {
 //	    user := target.(*User)
 //	    // Custom validation or preprocessing
 //	    if user.ID < 0 {
@@ -75,7 +76,7 @@ type colBind struct {
 //	})
 //
 // Performance: Registration is typically done once during application startup
-func RegisterScanner[T any](entity T, fn func(any, FieldBinder) error) {
+func RegisterScanner[T any](entity T, fn func(any, FieldBinder, *Context) error) {
 	t := reflect.TypeOf(entity)
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
@@ -93,12 +94,12 @@ func RegisterScanner[T any](entity T, fn func(any, FieldBinder) error) {
 //
 // Example:
 //
-//	config := ScanConfig{SkipUnknownColumns: false, CaseSensitive: true}
-//	RegisterScannerWithConfig(User{}, config, func(target any, binder FieldBinder) error {
+//	config := ScanConfig{SkipUnknownColumns: false}
+//	RegisterScannerWithConfig(User{}, config, func(target any, binder FieldBinder, ctx *Context) error {
 //	    // Configuration-aware scanning logic
-//	    return customScanLogic(target, binder)
+//	    return customScanLogic(target, binder, ctx)
 //	})
-func RegisterScannerWithConfig[T any](entity T, config ScanConfig, fn func(any, FieldBinder) error) {
+func RegisterScannerWithConfig[T any](entity T, config ScanConfig, fn func(any, FieldBinder, *Context) error) {
 	t := reflect.TypeOf(entity)
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
@@ -126,20 +127,20 @@ func RegisterScannerWithConfig[T any](entity T, config ScanConfig, fn func(any, 
 //
 // Returns:
 //   - ScannerFunc: Optimized scanner with full pipeline implementation
-func wrapScanner(fn func(any, FieldBinder) error) ScannerFunc {
+func wrapScanner(fn func(any, FieldBinder, *Context) error) ScannerFunc {
 	return wrapScannerWithConfig(fn, DefaultScanConfig)
 }
 
 // wrapScannerWithConfig creates a configuration-aware scanner wrapper.
 // Extends wrapScanner with custom configuration options for specialized scanning behavior.
-func wrapScannerWithConfig(fn func(any, FieldBinder) error, config ScanConfig) ScannerFunc {
-	return func(target any, row RowScanner) error {
+func wrapScannerWithConfig(fn func(any, FieldBinder, *Context) error, config ScanConfig) ScannerFunc {
+	return func(target any, row RowScanner, ctx *Context) error {
 		// Get pooled field binder for memory efficiency
-		binder := newBinder(target)
+		binder := newBinder(target, ctx)
 		defer returnBinder(binder)
 
 		// Execute user-defined binding logic
-		if err := fn(target, binder); err != nil {
+		if err := fn(target, binder, ctx); err != nil {
 			return err
 		}
 
@@ -159,7 +160,7 @@ func wrapScannerWithConfig(fn func(any, FieldBinder) error, config ScanConfig) S
 			typ = typ.Elem()
 		}
 
-		meta, err := Introspect(typ)
+		meta, err := ctx.Introspect(typ)
 		if err != nil {
 			return err
 		}
@@ -178,8 +179,8 @@ func wrapScannerWithConfig(fn func(any, FieldBinder) error, config ScanConfig) S
 		for i, col := range columns {
 			// Handle case sensitivity based on configuration
 			columnKey := col
-			if !schemaContext.caseSensitive {
-				columnKey = schemaContext.namingStrategy.ColumnName(col)
+			if !ctx.caseSensitive {
+				columnKey = ctx.namingStrategy.ColumnName(col)
 			}
 
 			if fm, exists := meta.ColumnMap[columnKey]; exists && fm.DirectSet != nil {
@@ -255,7 +256,7 @@ func wrapScannerWithConfig(fn func(any, FieldBinder) error, config ScanConfig) S
 //
 //	scanner := getRegisteredScanner(reflect.TypeOf(User{}))
 //	if scanner != nil {
-//	    return scanner(target, row)
+//	    return scanner(target, row, ctx)
 //	}
 //	// Fall back to default scanning
 func getRegisteredScanner(t reflect.Type) ScannerFunc {

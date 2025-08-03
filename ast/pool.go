@@ -4,56 +4,64 @@ import (
 	"sync"
 )
 
-// Pools for commonly used AST nodes
+// Enhanced pools with better sizing and additional node types
 var (
 	selectStmtPool = sync.Pool{
 		New: func() any {
 			return &SelectStmt{
-				Columns: make([]Node, 0, 10), // Larger initial capacity
+				Columns: make([]Node, 0, 10),
 				Joins:   make([]*JoinClause, 0, 4),
 				OrderBy: make([]*OrderByClause, 0, 4),
 			}
 		},
 	}
-	
+
 	columnPool = sync.Pool{
-		New: func() any {
-			return &Column{}
-		},
+		New: func() any { return &Column{} },
 	}
-	
+
 	tablePool = sync.Pool{
-		New: func() any {
-			return &Table{}
-		},
+		New: func() any { return &Table{} },
 	}
-	
+
 	valuePool = sync.Pool{
-		New: func() any {
-			return &Value{}
-		},
+		New: func() any { return &Value{} },
 	}
-	
+
 	binaryExprPool = sync.Pool{
-		New: func() any {
-			return &BinaryExpr{}
-		},
+		New: func() any { return &BinaryExpr{} },
 	}
-	
+
 	whereClausePool = sync.Pool{
+		New: func() any { return &WhereClause{} },
+	}
+
+	limitClausePool = sync.Pool{
+		New: func() any { return &LimitClause{} },
+	}
+
+	orderByClausePool = sync.Pool{
+		New: func() any { return &OrderByClause{} },
+	}
+
+	arrayPool = sync.Pool{
 		New: func() any {
-			return &WhereClause{}
+			return &Array{Values: make([]Value, 0, 8)}
 		},
 	}
-	
-	limitClausePool = sync.Pool{
+
+	groupByClausePool = sync.Pool{
 		New: func() any {
-			return &LimitClause{}
+			return &GroupByClause{Exprs: make([]Node, 0, 4)}
 		},
+	}
+
+	joinClausePool = sync.Pool{
+		New: func() any { return &JoinClause{} },
 	}
 )
 
-// Factory functions for pooled AST nodes
+// NewSelectStmt creates a new SelectStmt with preallocated slices for performance
 func NewSelectStmt() *SelectStmt {
 	s := selectStmtPool.Get().(*SelectStmt)
 	s.Columns = s.Columns[:0]
@@ -69,22 +77,29 @@ func NewSelectStmt() *SelectStmt {
 }
 
 func (s *SelectStmt) Release() {
-	// Release nested nodes first
 	for _, col := range s.Columns {
-		if c, ok := col.(*Column); ok {
-			c.Release()
+		if releasable, ok := col.(interface{ Release() }); ok {
+			releasable.Release()
 		}
 	}
 	if s.From != nil {
 		s.From.Release()
 	}
+	for _, join := range s.Joins {
+		join.Release()
+	}
 	if s.Where != nil {
 		s.Where.Release()
+	}
+	if s.GroupBy != nil {
+		s.GroupBy.Release()
+	}
+	for _, order := range s.OrderBy {
+		order.Release()
 	}
 	if s.Limit != nil {
 		s.Limit.Release()
 	}
-	
 	selectStmtPool.Put(s)
 }
 
@@ -131,11 +146,11 @@ func NewBinaryExpr(left Node, op string, right Node) *BinaryExpr {
 }
 
 func (b *BinaryExpr) Release() {
-	if c, ok := b.Left.(*Column); ok {
-		c.Release()
+	if releasable, ok := b.Left.(interface{ Release() }); ok {
+		releasable.Release()
 	}
-	if v, ok := b.Right.(*Value); ok {
-		v.Release()
+	if releasable, ok := b.Right.(interface{ Release() }); ok {
+		releasable.Release()
 	}
 	binaryExprPool.Put(b)
 }
@@ -147,19 +162,83 @@ func NewWhereClause(condition Node) *WhereClause {
 }
 
 func (w *WhereClause) Release() {
-	if b, ok := w.Condition.(*BinaryExpr); ok {
-		b.Release()
+	if releasable, ok := w.Condition.(interface{ Release() }); ok {
+		releasable.Release()
 	}
 	whereClausePool.Put(w)
 }
 
-func NewLimitClause(count *int) *LimitClause {
+func NewLimitClause(count, offset *int) *LimitClause {
 	l := limitClausePool.Get().(*LimitClause)
 	l.Count = count
-	l.Offset = nil
+	l.Offset = offset
 	return l
 }
 
 func (l *LimitClause) Release() {
 	limitClausePool.Put(l)
+}
+
+func NewOrderByClause(expr Node, desc bool) *OrderByClause {
+	o := orderByClausePool.Get().(*OrderByClause)
+	o.Expr = expr
+	o.Desc = desc
+	return o
+}
+
+func (o *OrderByClause) Release() {
+	if releasable, ok := o.Expr.(interface{ Release() }); ok {
+		releasable.Release()
+	}
+	orderByClausePool.Put(o)
+}
+
+func NewArray(values []any) *Array {
+	a := arrayPool.Get().(*Array)
+	a.Values = a.Values[:0]
+
+	for _, val := range values {
+		a.Values = append(a.Values, Value{Val: val})
+	}
+	return a
+}
+
+func (a *Array) Release() {
+	a.Values = a.Values[:0]
+	arrayPool.Put(a)
+}
+
+func NewGroupByClause(exprs []Node) *GroupByClause {
+	g := groupByClausePool.Get().(*GroupByClause)
+	g.Exprs = g.Exprs[:0]
+	g.Exprs = append(g.Exprs, exprs...)
+	return g
+}
+
+func (g *GroupByClause) Release() {
+	for _, expr := range g.Exprs {
+		if releasable, ok := expr.(interface{ Release() }); ok {
+			releasable.Release()
+		}
+	}
+	g.Exprs = g.Exprs[:0]
+	groupByClausePool.Put(g)
+}
+
+func NewJoinClause(joinType JoinType, table *Table, condition Node) *JoinClause {
+	j := joinClausePool.Get().(*JoinClause)
+	j.JoinType = joinType
+	j.Table = table
+	j.Condition = condition
+	return j
+}
+
+func (j *JoinClause) Release() {
+	if j.Table != nil {
+		j.Table.Release()
+	}
+	if releasable, ok := j.Condition.(interface{ Release() }); ok {
+		releasable.Release()
+	}
+	joinClausePool.Put(j)
 }

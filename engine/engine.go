@@ -22,11 +22,11 @@ type Engine struct {
 	colCache    sync.Map  // map[string][]ast.Node
 	stmtCache   cache.StatementCache
 	visitor     *visitor.SQLVisitor
+	schema      *schema.Context
 }
 
 func New(db *sql.DB) *Engine {
 	qc := cache.NewQueryCache()
-	schema.InitializeCache(1024, nil)
 	return &Engine{
 		db:        db,
 		qcache:    qc,
@@ -37,6 +37,7 @@ func New(db *sql.DB) *Engine {
 			},
 		},
 		visitor: visitor.NewSQLVisitor(dialect.NewPostgresDialect(), qc),
+		schema:  schema.New(),
 	}
 }
 
@@ -61,7 +62,7 @@ func (e *Engine) astFromCols(cols []string) []ast.Node {
 }
 
 func (e *Engine) FindOne(dest any) (string, error) {
-	meta, err := schema.Introspect(reflect.TypeOf(dest))
+	meta, err := e.schema.Introspect(reflect.TypeOf(dest))
 	if err != nil {
 		return "", err
 	}

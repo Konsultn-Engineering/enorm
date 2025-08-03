@@ -9,10 +9,11 @@ import (
 type JoinType int
 
 const (
-	InnerJoin JoinType = iota
-	LeftJoin
-	RightJoin
-	FullJoin
+	JoinInner JoinType = iota
+	JoinLeft
+	JoinRight
+	JoinFull
+	JoinCross
 )
 
 type JoinClause struct {

@@ -2,7 +2,8 @@ package main
 
 import (
 	"fmt"
-	"reflect"
+	"github.com/Konsultn-Engineering/enorm/query"
+	"github.com/Konsultn-Engineering/enorm/schema"
 	"time"
 )
 
@@ -15,12 +16,7 @@ type Users struct {
 }
 
 func main() {
-	u := &Users{}
-	structType := reflect.TypeOf(*u)
-	for i := 0; i < structType.NumField(); i++ {
-		field := structType.Field(i)
-		fmt.Printf("Field %d: %s, Type: %s, Tag: %s\n", i, field.Name, field.Type, field.Tag)
-		fmt.Println("new ref", reflect.TypeOf(reflect.New(field.Type).Elem().Interface()))
-	}
-	fmt.Println(structType)
+	selectB := query.Select[Users](schema.New())
+	selectB.Columns("public_id", "email_id", "first_name")
+	fmt.Println(selectB.ToSQL())
 }

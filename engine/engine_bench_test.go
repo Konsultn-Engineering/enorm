@@ -7,6 +7,7 @@ import (
 	"github.com/Konsultn-Engineering/enorm/schema"
 	"os"
 	"reflect"
+	"runtime"
 	"runtime/pprof"
 	"testing"
 	"time"
@@ -54,24 +55,24 @@ func init() {
 
 }
 
-//func BenchmarkFindOne(b *testing.B) {
-//	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldBinder) error {
-//		u := a.(*User)
-//		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt)
-//	})
-//
-//	u := User{}
-//
-//	// Warm-up or validate connection
-//	_, _ = e.FindOne(&u)
-//	runtime.GC()
-//	b.ResetTimer()
-//	for i := 0; i < b.N; i++ {
-//		_, _ = e.FindOne(&u)
-//	}
-//
-//	b.ReportAllocs()
-//}
+func BenchmarkFindOne(b *testing.B) {
+	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldBinder, ctx *schema.Context) error {
+		u := a.(*User)
+		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt)
+	})
+
+	u := User{}
+
+	// Warm-up or validate connection
+	_, _ = e.FindOne(&u)
+	runtime.GC()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = e.FindOne(&u)
+	}
+
+	b.ReportAllocs()
+}
 
 func BenchmarkFindOneWithProfile(b *testing.B) {
 	// Create CPU profile
@@ -103,7 +104,7 @@ func BenchmarkSchemaIntrospect(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, err := schema.Introspect(userType)
+		_, err := e.schema.Introspect(userType)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -125,7 +126,7 @@ func BenchmarkGetConverter(b *testing.B) {
 
 func BenchmarkDirectSet(b *testing.B) {
 	user := &User{}
-	meta, _ := schema.Introspect(reflect.TypeOf(user))
+	meta, _ := e.schema.Introspect(reflect.TypeOf(user))
 	fieldMeta := meta.ColumnMap["first_name"]
 
 	b.ResetTimer()
@@ -176,12 +177,12 @@ func BenchmarkFindOneStepByStep(b *testing.B) {
 		userType := reflect.TypeOf(user)
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			schema.Introspect(userType)
+			e.schema.Introspect(userType)
 		}
 	})
 
 	b.Run("QueryBuild", func(b *testing.B) {
-		meta, _ := schema.Introspect(reflect.TypeOf(user))
+		meta, _ := e.schema.Introspect(reflect.TypeOf(user))
 		cols := []string{"id", "first_name", "email", "created_at", "updated_at"}
 
 		b.ResetTimer()
@@ -209,7 +210,7 @@ func BenchmarkFindOneStepByStep(b *testing.B) {
 	})
 
 	b.Run("ScanAndSet", func(b *testing.B) {
-		meta, _ := schema.Introspect(reflect.TypeOf(user))
+		meta, _ := e.schema.Introspect(reflect.TypeOf(user))
 		cols := []string{"id", "first_name", "email", "created_at", "updated_at"}
 		scanVals := []any{int64(1), "John", "john@example.com", time.Now(), time.Now()}
 
@@ -238,7 +239,7 @@ func BenchmarkFindOneWithTiming(b *testing.B) {
 
 		// 1. Introspection
 		introspectStart := time.Now()
-		meta, err := schema.Introspect(reflect.TypeOf(user))
+		meta, err := e.schema.Introspect(reflect.TypeOf(user))
 		if err != nil {
 			b.Fatal(err)
 		}

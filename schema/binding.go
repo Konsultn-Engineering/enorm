@@ -39,9 +39,11 @@ var binderPool = sync.Pool{
 // Fields:
 //   - entity: Target struct instance for field binding
 //   - bindings: Column name to optimized setter function mapping
+//   - ctx: Schema context for introspection and configuration
 type fieldBinder struct {
 	entity   any                                  // Target struct instance
 	bindings map[string]func(entity any, val any) // Column name -> optimized setter function
+	ctx      *Context                             // Schema context for introspection
 }
 
 // newBinder creates a fieldBinder instance from the pool for the specified entity.
@@ -52,6 +54,7 @@ type fieldBinder struct {
 //
 // Parameters:
 //   - entity: Target struct instance for field binding (must be struct pointer)
+//   - ctx: Schema context for introspection and configuration
 //
 // Returns:
 //   - *fieldBinder: Ready-to-use binder with cleared bindings from pool
@@ -59,11 +62,12 @@ type fieldBinder struct {
 // Example:
 //
 //	var user User
-//	binder := newBinder(&user)
+//	binder := newBinder(&user, schemaCtx)
 //	defer returnBinder(binder)
-func newBinder(entity any) *fieldBinder {
+func newBinder(entity any, ctx *Context) *fieldBinder {
 	fb := binderPool.Get().(*fieldBinder)
 	fb.entity = entity
+	fb.ctx = ctx
 
 	// Fast map clearing - preserves underlying capacity for reuse
 	clear(fb.bindings) // Go 1.21+ builtin - faster than range+delete loop
@@ -82,10 +86,11 @@ func newBinder(entity any) *fieldBinder {
 //
 // Example:
 //
-//	binder := newBinder(&user)
+//	binder := newBinder(&user, ctx)
 //	defer returnBinder(binder)
 func returnBinder(fb *fieldBinder) {
 	fb.entity = nil // Prevent memory leak from retained references
+	fb.ctx = nil    // Clear context reference
 	binderPool.Put(fb)
 }
 
@@ -114,7 +119,7 @@ func returnBinder(fb *fieldBinder) {
 // Example:
 //
 //	var user User
-//	binder := newBinder(&user)
+//	binder := newBinder(&user, ctx)
 //	err := binder.Bind(&user, &user.ID, &user.Name, &user.Email)
 //	if err != nil {
 //	    return fmt.Errorf("binding failed: %w", err)
@@ -135,8 +140,8 @@ func (fb *fieldBinder) Bind(entity any, fields ...any) error {
 
 	structType := structVal.Type()
 
-	// Single introspection call with LRU caching for metadata
-	meta, err := Introspect(structType)
+	// Single introspection call with LRU caching for metadata using context
+	meta, err := fb.ctx.Introspect(structType)
 	if err != nil {
 		return fmt.Errorf("failed to introspect struct type %s: %w", structType.Name(), err)
 	}

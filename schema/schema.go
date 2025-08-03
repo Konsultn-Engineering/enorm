@@ -51,6 +51,7 @@ type Context struct {
 	onEvict   func(reflect.Type, *EntityMeta)
 }
 
+// Option defines functional options for Context configuration
 type Option func(*Context)
 
 // WithNamingStrategy sets the naming strategy for database column mapping
@@ -91,8 +92,32 @@ func WithEvictionCallback(onEvict func(reflect.Type, *EntityMeta)) Option {
 	return func(ctx *Context) { ctx.onEvict = onEvict }
 }
 
-// New creates a schema with configuration
-// Called by enorm during initialization
+// New creates a new schema Context with the specified options.
+// Each Context maintains independent configuration and caching,
+// allowing multiple database connections with different schema settings.
+//
+// Default configuration:
+//   - NamingStrategy: DefaultNamingStrategy()
+//   - TagName: "db"
+//   - CaseSensitive: false
+//   - GuaranteeTypes: false (safe mode)
+//   - ValidateInDev: true
+//   - CacheSize: 256
+//
+// Example:
+//
+//	// High-performance trading system
+//	fastCtx := schema.New(
+//	    schema.WithGuaranteeTypes(true),    // Maximum performance
+//	    schema.WithValidateInDev(false),    // No validation overhead
+//	    schema.WithCacheSize(512),          // Larger cache
+//	)
+//
+//	// Safe user management system
+//	safeCtx := schema.New(
+//	    schema.WithGuaranteeTypes(false),   // Safety first
+//	    schema.WithValidateInDev(true),     // Full validation
+//	)
 func New(options ...Option) *Context {
 	ctx := &Context{
 		// Default configuration
@@ -113,7 +138,28 @@ func New(options ...Option) *Context {
 	}
 
 	// Initialize cache
-	//ctx.initializeCache()
+	ctx.initializeCache()
 
 	return ctx
+}
+
+func (ctx *Context) GetConfiguration() ContextConfig {
+	return ContextConfig{
+		NamingStrategy: ctx.namingStrategy,
+		TagName:        ctx.tagName,
+		CaseSensitive:  ctx.caseSensitive,
+		GuaranteeTypes: ctx.guaranteeTypes,
+		ValidateInDev:  ctx.validateInDev,
+		CacheSize:      ctx.cacheSize,
+	}
+}
+
+// ContextConfig represents the configuration state of a Context
+type ContextConfig struct {
+	NamingStrategy NamingStrategy
+	TagName        string
+	CaseSensitive  bool
+	GuaranteeTypes bool
+	ValidateInDev  bool
+	CacheSize      int
 }
