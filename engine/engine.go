@@ -26,7 +26,7 @@ type Engine struct {
 
 func New(db *sql.DB) *Engine {
 	qc := cache.NewQueryCache()
-	schema.New(1024, func(key reflect.Type, value *schema.EntityMeta) {})
+	schema.InitializeCache(1024, nil)
 	return &Engine{
 		db:        db,
 		qcache:    qc,

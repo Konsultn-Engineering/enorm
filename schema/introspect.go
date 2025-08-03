@@ -2,49 +2,53 @@ package schema
 
 import (
 	"fmt"
-	lru "github.com/hashicorp/golang-lru/v2"
 	"reflect"
 	"sync"
+
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 var (
-	// entityCache is the global LRU cache storing pre-computed struct metadata.
-	// Key: reflect.Type of struct, Value: Complete EntityMeta with all optimizations.
-	// Thread-safe for concurrent access across goroutines during database operations.
+	// entityCache stores pre-computed struct metadata for high-performance repeated access.
+	// Key: reflect.Type of struct, Value: Complete EntityMeta with optimized field setters.
+	// Thread-safe LRU cache with automatic eviction when size limit is exceeded.
 	entityCache *lru.Cache[reflect.Type, *EntityMeta]
 
-	// cacheInitOnce ensures the cache is initialized exactly once, even under
-	// concurrent access. Prevents race conditions during application startup.
+	// cacheInitOnce ensures thread-safe single initialization of the global cache.
+	// Prevents race conditions during concurrent application startup.
 	cacheInitOnce sync.Once
 
-	// defaultCacheSize provides a reasonable default for most applications.
-	// Sized to handle ~100-500 struct types which covers typical web applications.
+	// defaultCacheSize provides sensible defaults for typical applications.
+	// Accommodates 100-500 struct types, covering most web application needs.
 	defaultCacheSize = 256
 
-	// precompiledTypes stores metadata for frequently used types that are
-	// pre-compiled at application startup for zero-latency access.
-	// This provides the fastest possible lookup path, bypassing both LRU cache
-	// and reflection entirely for critical hot-path struct types.
+	// precompiledTypes stores metadata for critical types pre-analyzed at startup.
+	// Provides zero-latency access for hot-path structs, bypassing even cache lookup.
+	// Use PrecompileType[T]() during application initialization for maximum performance.
 	precompiledTypes = make(map[reflect.Type]*EntityMeta, 64)
 	precompiledMu    sync.RWMutex
 )
 
-// New initializes the global entity metadata cache with specified size and eviction callback.
-// Must be called once during application startup before any Introspect() calls.
-// Thread-safe initialization using sync.Once to prevent duplicate cache creation.
+// InitializeCache sets up the global entity metadata cache with custom configuration.
+// Should be called once during application startup before any database operations.
+//
+// Thread-safe initialization prevents duplicate cache creation under concurrent access.
+// If not called explicitly, cache auto-initializes with default settings on first use.
 //
 // Parameters:
-//   - size: Maximum number of struct types to cache (LRU eviction when exceeded)
-//   - onEvict: Optional callback function called when cache entries are evicted
-//     Can be nil if eviction notification is not needed
+//   - size: Maximum struct types to cache (typical: 64-1024, default: 256)
+//   - onEvict: Optional callback for cache eviction events (can be nil)
 //
-// Performance considerations:
-//   - Larger cache reduces reflection overhead but increases memory usage
-//   - Typical sizing: 64 (small apps) to 1024 (large enterprise apps)
-//   - Each cached entry uses ~1-5KB depending on struct complexity
-func New(size int, onEvict func(key reflect.Type, value *EntityMeta)) {
+// Memory usage: ~1-5KB per cached struct type depending on field complexity.
+// Larger caches reduce reflection overhead but consume more memory.
+//
+// Example:
+//
+//	schema.InitializeCache(512, func(t reflect.Type, meta *EntityMeta) {
+//	    log.Printf("Evicted metadata for type: %s", t.Name())
+//	})
+func InitializeCache(size int, onEvict func(key reflect.Type, value *EntityMeta)) {
 	cacheInitOnce.Do(func() {
-		// Validate cache size to prevent configuration errors
 		if size <= 0 {
 			size = defaultCacheSize
 		}
@@ -57,36 +61,36 @@ func New(size int, onEvict func(key reflect.Type, value *EntityMeta)) {
 		}
 
 		if err != nil {
-			panic(fmt.Sprintf("failed to create entityCache with size %d: %v", size, err))
+			panic(fmt.Sprintf("failed to initialize entity cache with size %d: %v", size, err))
 		}
 	})
 }
 
 // PrecompileType performs expensive reflection analysis at application startup
-// to eliminate all runtime reflection overhead for frequently used struct types.
-// This is the ultimate performance optimization for hot-path database operations.
+// to eliminate all runtime reflection overhead for frequently accessed struct types.
 //
-// Usage:
-//   - Call during application initialization for all critical struct types
-//   - Subsequent Introspect() calls for these types will be ~100x faster
-//   - Ideal for request/response models, domain entities, and DTO types
+// This is the ultimate performance optimization for hot-path database operations,
+// reducing introspection time from ~1-5ms to ~50ns (100x faster).
 //
-// Performance impact:
-//   - Startup cost: ~1-5ms per type (acceptable one-time cost)
-//   - Runtime gain: ~30-50k ns/op reduction per Introspect() call
-//   - Memory overhead: ~1-5KB per precompiled type
+// Best practices:
+//   - Call during application initialization for all domain entities
+//   - Use for request/response DTOs and frequently queried entities
+//   - Ideal for high-throughput database operations
 //
-// Type parameter T: The struct type to precompile (can be value or pointer type)
+// Type parameter T: The struct type to precompile (value or pointer types accepted)
 //
 // Returns: Complete EntityMeta for immediate use if needed
 //
 // Example:
 //
-//	schema.PrecompileType[User]()
-//	schema.PrecompileType[*Product]() // pointer types are normalized
+//	schema.PrecompileType[User]()        // Precompile User struct
+//	schema.PrecompileType[*Product]()    // Precompile Product (pointer normalized)
+//	schema.PrecompileType[OrderItem]()   // Precompile OrderItem struct
 func PrecompileType[T any]() *EntityMeta {
 	var zero T
 	t := reflect.TypeOf(zero)
+
+	// Normalize pointer types to their element type
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
@@ -94,48 +98,57 @@ func PrecompileType[T any]() *EntityMeta {
 	precompiledMu.Lock()
 	defer precompiledMu.Unlock()
 
+	// Return existing precompiled metadata if available
 	if meta, exists := precompiledTypes[t]; exists {
 		return meta
 	}
 
+	// Build and store metadata for ultra-fast future access
 	meta, err := buildMeta(t)
 	if err != nil {
-		panic(fmt.Sprintf("failed to precompile type %s: %v", t, err))
+		panic(fmt.Sprintf("failed to precompile metadata for type %s: %v", t, err))
 	}
 
 	precompiledTypes[t] = meta
 	return meta
 }
 
-// ensureCacheInitialized provides automatic cache initialization with default settings
-// if New() was never called. Prevents nil pointer panics in library usage scenarios
-// where explicit initialization might be forgotten.
+// ensureCacheInitialized provides lazy initialization with default settings
+// when InitializeCache() was never called explicitly. Prevents nil pointer panics
+// in library usage scenarios where initialization might be overlooked.
 func ensureCacheInitialized() {
 	if entityCache == nil {
-		New(defaultCacheSize, nil)
+		InitializeCache(defaultCacheSize, nil)
 	}
 }
 
 // Introspect retrieves or generates comprehensive metadata for a struct type.
-// Uses a three-tier performance strategy for optimal speed across all scenarios:
+// Implements a three-tier performance strategy for optimal speed:
 //
 // 1. Ultra-fast path: Precompiled types (~50ns, zero allocations)
-// 2. Fast path: LRU cache hits (~100ns, hash lookup only)
+// 2. Fast path: LRU cache hits (~100ns, single hash lookup)
 // 3. Slow path: Full reflection analysis (~1-5ms, cached for future use)
 //
-// Cache performance statistics:
-//   - Precompiled hit rate: Varies by application (0-80% for optimized apps)
+// Performance characteristics:
+//   - Precompiled hit rate: 0-80% (depends on PrecompileType usage)
 //   - LRU cache hit rate: >95% in steady-state applications
-//   - Total reflection avoidance: >99% of calls after warmup
+//   - Combined reflection avoidance: >99% after application warmup
 //
 // Parameters:
-//   - t: reflect.Type of the struct to analyze (pointer types auto-dereferenced)
+//   - t: reflect.Type of struct to analyze (pointer types auto-normalized)
 //
 // Returns:
-//   - *EntityMeta: Complete metadata with pre-compiled setter functions and lookup maps
-//   - error: Only on invalid input types or reflection analysis failures
+//   - *EntityMeta: Complete metadata with pre-compiled field setters and lookup maps
+//   - error: Only for invalid input types or reflection analysis failures
 //
-// Thread safety: Fully concurrent-safe for read-heavy workloads typical in web applications
+// Thread safety: Fully concurrent-safe for high-throughput read operations.
+//
+// Example:
+//
+//	meta, err := schema.Introspect(reflect.TypeOf(User{}))
+//	if err != nil {
+//	    return fmt.Errorf("failed to introspect User struct: %w", err)
+//	}
 func Introspect(t reflect.Type) (*EntityMeta, error) {
 	// Normalize pointer types to their underlying struct type
 	originalType := t
@@ -145,12 +158,12 @@ func Introspect(t reflect.Type) (*EntityMeta, error) {
 
 	// Fast validation before expensive operations
 	if t.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("invalid model type: %s (expected struct, got %s from %s)",
-			t.Kind(), t.Kind(), originalType)
+		return nil, fmt.Errorf("invalid entity type: expected struct, got %s (from %s)",
+			t.Kind(), originalType)
 	}
 
-	// Ultra-fast path: Check precompiled types first (zero allocation lookup)
-	// This is the fastest possible path for hot-path struct types
+	// Ultra-fast path: Check precompiled types first (zero-allocation lookup)
+	// This provides the absolute fastest possible introspection for hot-path types
 	precompiledMu.RLock()
 	if meta, exists := precompiledTypes[t]; exists {
 		precompiledMu.RUnlock()
@@ -158,48 +171,46 @@ func Introspect(t reflect.Type) (*EntityMeta, error) {
 	}
 	precompiledMu.RUnlock()
 
-	// Ensure cache is initialized (lazy initialization)
+	// Ensure cache is initialized (lazy initialization safety net)
 	ensureCacheInitialized()
 
-	// Fast path: Check LRU cache (>95% hit rate in steady state)
-	// LRU cache handles concurrent access internally with minimal locking
+	// Fast path: Check LRU cache (>95% hit rate in steady-state)
+	// LRU cache provides thread-safe concurrent access with minimal contention
 	if meta, exists := entityCache.Get(t); exists {
 		return meta, nil
 	}
 
 	// Slow path: Generate metadata through expensive reflection analysis
-	// This only happens on first access to a struct type or after cache eviction
+	// Only executed on first access or after cache eviction
 	meta, err := buildMeta(t)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build metadata for type %s: %w", t, err)
 	}
 
-	// Cache the generated metadata for future access
-	// LRU eviction automatically handles cache size limits
+	// Cache the generated metadata for future high-speed access
 	entityCache.Add(t, meta)
 	return meta, nil
 }
 
-// GetCacheStats returns current cache statistics for monitoring and debugging.
-// Useful for tuning cache size and understanding application metadata access patterns.
+// GetCacheStats returns current cache utilization for performance monitoring.
+// Useful for tuning cache size and analyzing application metadata access patterns.
 //
-// Returns:
-//   - Current number of entries in LRU cache
-//   - Does not include precompiled types count (use GetPrecompiledCount for that)
+// Low utilization may indicate oversized cache; high utilization near capacity
+// suggests potential benefit from larger cache or more PrecompileType usage.
 //
-// Usage for monitoring:
-//   - Low cache utilization may indicate oversized cache
-//   - High utilization near cache size may indicate need for larger cache
-//   - Frequent evictions suggest adding PrecompileType calls for hot types
+// Returns: Number of currently cached struct types (excludes precompiled types)
 func GetCacheStats() int {
 	ensureCacheInitialized()
 	return entityCache.Len()
 }
 
 // GetPrecompiledCount returns the number of precompiled struct types.
-// Useful for monitoring the effectiveness of precompilation optimizations.
+// Indicates effectiveness of startup optimization strategy.
 //
-// Returns: Number of types that will use ultra-fast precompiled path
+// Higher counts generally correlate with better average introspection performance
+// for applications with well-defined hot-path struct types.
+//
+// Returns: Number of types using ultra-fast precompiled access path
 func GetPrecompiledCount() int {
 	precompiledMu.RLock()
 	defer precompiledMu.RUnlock()
@@ -207,27 +218,26 @@ func GetPrecompiledCount() int {
 }
 
 // ClearCache removes all cached metadata, forcing fresh reflection analysis
-// on next access. Does NOT clear precompiled types as they are startup optimizations.
+// on subsequent Introspect() calls. Precompiled types remain unaffected.
 //
 // Primary use cases:
-//   - Testing scenarios requiring fresh metadata
-//   - Dynamic type scenarios with frequent schema changes
-//   - Memory pressure situations (though precompiled types are preserved)
+//   - Testing scenarios requiring clean metadata state
+//   - Dynamic schema applications with runtime type changes
+//   - Memory pressure mitigation (preserves startup-optimized precompiled types)
 //
-// Performance impact: Next Introspect() calls will be slow until cache rebuilds
+// Performance impact: Significant slowdown until cache rebuilds through normal usage.
 func ClearCache() {
 	ensureCacheInitialized()
 	entityCache.Purge()
 }
 
 // ClearPrecompiled removes all precompiled type metadata.
-// This is primarily useful for testing scenarios or applications with
-// truly dynamic schemas that change at runtime.
+// Primarily useful for testing or applications with truly dynamic schemas.
 //
-// Warning: This will significantly impact performance for previously
-// precompiled types until they are precompiled again or cached via normal usage.
+// Warning: Significantly impacts performance for previously precompiled types
+// until they are either re-precompiled or accessed through normal cache flow.
 func ClearPrecompiled() {
 	precompiledMu.Lock()
 	defer precompiledMu.Unlock()
-	clear(precompiledTypes) // Go 1.21+ builtin
+	clear(precompiledTypes) // Go 1.21+ builtin for map clearing
 }

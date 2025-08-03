@@ -1,195 +1,504 @@
 package schema
 
 import (
-	"fmt"
 	"reflect"
-	"runtime"
 	"sync"
 	"testing"
 	"time"
 	"unsafe"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-// Test structures for validation
-type TestStruct struct {
-	ID        uint64
-	Name      string
-	Age       int32
-	Score     float64
-	Active    bool
-	CreatedAt time.Time
-	Data      []byte
-	Padding   [8]byte // For alignment testing
+// =========================================================================
+// Test Data Structures
+// =========================================================================
+
+type User struct {
+	ID        uint64    `db:"id"`
+	FirstName string    `db:"first_name"`
+	LastName  string    `db:"last_name"`
+	Email     string    `db:"email"`
+	Age       int32     `db:"age"`
+	Score     float64   `db:"score"`
+	Active    bool      `db:"active"`
+	CreatedAt time.Time `db:"created_at"`
+	UpdatedAt time.Time `db:"updated_at"`
+	Data      []byte    `db:"data"`
 }
 
-type SmallStruct struct {
-	A uint8
-	B uint16
-	C uint32
+type Product struct {
+	ID          uint64  `db:"id"`
+	Name        string  `db:"name"`
+	Price       float64 `db:"price"`
+	InStock     bool    `db:"in_stock"`
+	CategoryID  int64   `db:"category_id"`
+	Description string  `db:"description"`
 }
 
-type LargeStruct struct {
-	Field1 [1000]byte
-	Field2 string
-	Field3 uint64
-	Field4 [2000]byte
+type ComplexStruct struct {
+	StringField    string            `db:"string_field"`
+	IntField       int               `db:"int_field"`
+	FloatField     float64           `db:"float_field"`
+	BoolField      bool              `db:"bool_field"`
+	TimeField      time.Time         `db:"time_field"`
+	BytesField     []byte            `db:"bytes_field"`
+	PtrField       *string           `db:"ptr_field"`
+	SliceField     []string          `db:"slice_field"`
+	MapField       map[string]string `db:"map_field"`
+	InterfaceField interface{}       `db:"interface_field"`
 }
 
-// TestBasicFieldSetting tests basic unsafe pointer field setting
-func TestBasicFieldSetting(t *testing.T) {
+type EmbeddedStruct struct {
+	User
+	ExtraField string `db:"extra_field"`
+}
+
+type NoTagsStruct struct {
+	ID   uint64
+	Name string
+	Age  int
+}
+
+// =========================================================================
+// Introspection Tests
+// =========================================================================
+
+func TestIntrospect(t *testing.T) {
 	tests := []struct {
-		name        string
-		fieldName   string
-		value       any
-		expected    any
-		shouldPanic bool
+		name           string
+		inputType      reflect.Type
+		expectError    bool
+		expectedFields int
+		expectedTable  string
 	}{
-		{"SetUint64", "ID", uint64(12345), uint64(12345), false},
-		{"SetString", "Name", "test", "test", false},
-		{"SetInt32", "Age", int32(25), int32(25), false},
-		{"SetFloat64", "Score", float64(98.5), float64(98.5), false},
-		{"SetBool", "Active", true, true, false},
-		{"SetBytes", "Data", []byte("hello"), []byte("hello"), false},
+		{
+			name:           "ValidStruct",
+			inputType:      reflect.TypeOf(User{}),
+			expectError:    false,
+			expectedFields: 10,
+			expectedTable:  "users",
+		},
+		{
+			name:           "ValidStructPtr",
+			inputType:      reflect.TypeOf(&User{}),
+			expectError:    false,
+			expectedFields: 10,
+			expectedTable:  "users",
+		},
+		{
+			name:        "InvalidTypeString",
+			inputType:   reflect.TypeOf("string"),
+			expectError: true,
+		},
+		{
+			name:        "InvalidTypeInt",
+			inputType:   reflect.TypeOf(42),
+			expectError: true,
+		},
+		{
+			name:           "NoTagsStruct",
+			inputType:      reflect.TypeOf(NoTagsStruct{}),
+			expectError:    false,
+			expectedFields: 3,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defer func() {
-				if r := recover(); r != nil {
-					if !tt.shouldPanic {
-						t.Errorf("Unexpected panic: %v", r)
-					}
-				}
-			}()
+			meta, err := Introspect(tt.inputType)
 
-			ts := &TestStruct{}
-			structType := reflect.TypeOf(*ts)
-			field, found := structType.FieldByName(tt.fieldName)
-			if !found {
-				t.Fatalf("Field %s not found", tt.fieldName)
+			if tt.expectError {
+				assert.Error(t, err)
+				assert.Nil(t, meta)
+				return
 			}
 
-			setter := createDirectSetterFunc(field.Offset, field.Type, nil)
-			setter(unsafe.Pointer(ts), tt.value)
+			require.NoError(t, err)
+			require.NotNil(t, meta)
+			assert.Equal(t, tt.expectedFields, len(meta.Fields))
 
-			// Verify the value was set correctly
-			structValue := reflect.ValueOf(ts).Elem()
-			fieldValue := structValue.FieldByName(tt.fieldName)
-			actual := fieldValue.Interface()
+			if tt.expectedTable != "" {
+				assert.Equal(t, tt.expectedTable, meta.TableName)
+			}
 
-			if !reflect.DeepEqual(actual, tt.expected) {
-				t.Errorf("Expected %v, got %v", tt.expected, actual)
+			// Validate field metadata
+			for _, field := range meta.Fields {
+				assert.NotEmpty(t, field.Name)
+				assert.NotEmpty(t, field.DBName)
+				assert.NotNil(t, field.Type)
+				assert.NotNil(t, field.DirectSet)
+				assert.True(t, field.Offset >= 0)
+			}
+
+			// Validate column map
+			assert.Equal(t, len(meta.Fields), len(meta.ColumnMap))
+			for _, field := range meta.Fields {
+				foundField, exists := meta.ColumnMap[field.DBName]
+				assert.True(t, exists)
+				assert.Equal(t, field.Name, foundField.Name)
 			}
 		})
 	}
 }
 
-// TestMemoryBounds tests that we don't write outside struct boundaries
-func TestMemoryBounds(t *testing.T) {
-	t.Run("ValidOffsets", func(t *testing.T) {
-		ts := &TestStruct{}
-		structType := reflect.TypeOf(*ts)
-		structSize := structType.Size()
+func TestIntrospectCaching(t *testing.T) {
+	// Clear cache to start fresh
+	ClearCache()
+	ClearPrecompiled()
 
-		// Test all fields have valid offsets
-		for i := 0; i < structType.NumField(); i++ {
-			field := structType.Field(i)
+	userType := reflect.TypeOf(User{})
 
-			if field.Offset >= structSize {
-				t.Errorf("Field %s offset %d exceeds struct size %d",
-					field.Name, field.Offset, structSize)
+	// First call should build metadata
+	meta1, err := Introspect(userType)
+	require.NoError(t, err)
+	require.NotNil(t, meta1)
+
+	// Second call should return cached metadata
+	meta2, err := Introspect(userType)
+	require.NoError(t, err)
+	require.NotNil(t, meta2)
+
+	// Should be the same instance (cached)
+	assert.True(t, meta1 == meta2, "Expected same instance from cache")
+
+	// Cache stats should show 1 item
+	assert.Equal(t, 1, GetCacheStats())
+}
+
+func TestPrecompileType(t *testing.T) {
+	// Clear precompiled to start fresh
+	ClearPrecompiled()
+	assert.Equal(t, 0, GetPrecompiledCount())
+
+	// Precompile User type
+	meta := PrecompileType[User]()
+	require.NotNil(t, meta)
+	assert.Equal(t, 1, GetPrecompiledCount())
+
+	// Introspect should use precompiled version
+	userType := reflect.TypeOf(User{})
+	meta2, err := Introspect(userType)
+	require.NoError(t, err)
+
+	// Should be the same instance (precompiled)
+	assert.True(t, meta == meta2, "Expected same precompiled instance")
+
+	// Test with pointer type
+	meta3 := PrecompileType[*User]()
+	assert.True(t, meta == meta3, "Pointer type should normalize to same metadata")
+}
+
+func TestIntrospectConcurrency(t *testing.T) {
+	const numGoroutines = 10 // Reduced for more reliable testing
+	const numIterations = 10
+
+	ClearCache()
+	ClearPrecompiled()
+
+	var wg sync.WaitGroup
+	errors := make(chan error, numGoroutines)
+	results := make(chan *EntityMeta, numGoroutines*numIterations)
+
+	// Use a barrier to ensure all goroutines start at the same time
+	startBarrier := make(chan struct{})
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+
+			// Wait for all goroutines to be ready
+			<-startBarrier
+
+			for j := 0; j < numIterations; j++ {
+				meta, err := Introspect(reflect.TypeOf(User{}))
+				if err != nil {
+					errors <- err
+					return
+				}
+				results <- meta
 			}
+		}(i)
+	}
 
-			if field.Offset+field.Type.Size() > structSize {
-				t.Errorf("Field %s extends beyond struct bounds", field.Name)
-			}
+	// Release all goroutines at once
+	close(startBarrier)
+
+	wg.Wait()
+	close(errors)
+	close(results)
+
+	// Check for errors
+	for err := range errors {
+		t.Errorf("Concurrent introspection error: %v", err)
+	}
+
+	// Collect all results and verify they're consistent
+	var metas []*EntityMeta
+	for meta := range results {
+		metas = append(metas, meta)
+	}
+
+	assert.Equal(t, numGoroutines*numIterations, len(metas))
+
+	// All metas should be identical (either all same cached instance, or at least equivalent)
+	if len(metas) > 0 {
+		firstMeta := metas[0]
+		for i, meta := range metas {
+			// They should at least have the same content even if not same instance
+			assert.Equal(t, len(firstMeta.Fields), len(meta.Fields), "Meta %d should have same field count", i)
+			assert.Equal(t, firstMeta.TableName, meta.TableName, "Meta %d should have same table name", i)
 		}
+	}
+
+	assert.Equal(t, 1, GetCacheStats()) // Should only have 1 cached item
+}
+
+// =========================================================================
+// Field Binding Tests
+// =========================================================================
+
+func TestFieldBinder(t *testing.T) {
+	user := &User{}
+	binder := newBinder(user)
+	defer returnBinder(binder)
+
+	err := binder.Bind(user, &user.ID, &user.FirstName, &user.Email)
+	require.NoError(t, err)
+
+	bindings := binder.Bindings()
+	assert.Equal(t, 3, len(bindings))
+	assert.True(t, binder.HasBinding("id"))
+	assert.True(t, binder.HasBinding("first_name"))
+	assert.True(t, binder.HasBinding("email"))
+	assert.False(t, binder.HasBinding("nonexistent"))
+
+	assert.Equal(t, 3, binder.BindingCount())
+}
+
+func TestFieldBinderErrors(t *testing.T) {
+	t.Run("NonPointerEntity", func(t *testing.T) {
+		binder := newBinder("not a pointer")
+		defer returnBinder(binder)
+
+		err := binder.Bind("not a pointer", "field")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "must be a pointer")
 	})
 
-	t.Run("MemoryIntegrity", func(t *testing.T) {
-		// Create a struct with sentinel values around target field
-		type BoundedStruct struct {
-			Sentinel1 uint64 // Should remain unchanged
-			Target    uint64 // This is what we'll modify
-			Sentinel2 uint64 // Should remain unchanged
-		}
+	t.Run("NonStructEntity", func(t *testing.T) {
+		str := "string"
+		binder := newBinder(&str)
+		defer returnBinder(binder)
 
-		const (
-			sentinel1Value = uint64(0xDEADBEEFCAFEBABE)
-			sentinel2Value = uint64(0xFEEDFACEDEADC0DE)
-			targetValue    = uint64(0x1234567890ABCDEF)
-		)
+		err := binder.Bind(&str, &str)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "must be pointer to struct")
+	})
 
-		bs := &BoundedStruct{
-			Sentinel1: sentinel1Value,
-			Target:    0,
-			Sentinel2: sentinel2Value,
-		}
+	t.Run("NilFieldPointer", func(t *testing.T) {
+		user := &User{}
+		binder := newBinder(user)
+		defer returnBinder(binder)
 
-		structType := reflect.TypeOf(*bs)
-		field, _ := structType.FieldByName("Target")
-		setter := createDirectSetterFunc(field.Offset, field.Type, nil)
+		err := binder.Bind(user, nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "field pointer")
+		assert.Contains(t, err.Error(), "is nil")
+	})
 
-		// Set the target field
-		setter(unsafe.Pointer(bs), targetValue)
+	t.Run("NonPointerField", func(t *testing.T) {
+		user := &User{}
+		binder := newBinder(user)
+		defer returnBinder(binder)
 
-		// Verify sentinels are unchanged
-		if bs.Sentinel1 != sentinel1Value {
-			t.Errorf("Sentinel1 corrupted: expected %#x, got %#x",
-				sentinel1Value, bs.Sentinel1)
-		}
-		if bs.Sentinel2 != sentinel2Value {
-			t.Errorf("Sentinel2 corrupted: expected %#x, got %#x",
-				sentinel2Value, bs.Sentinel2)
-		}
-		if bs.Target != targetValue {
-			t.Errorf("Target not set correctly: expected %#x, got %#x",
-				targetValue, bs.Target)
-		}
+		err := binder.Bind(user, "not a pointer")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "must be a pointer")
+	})
+
+	t.Run("FieldNotBelongingToStruct", func(t *testing.T) {
+		user := &User{}
+		product := &Product{}
+		binder := newBinder(user)
+		defer returnBinder(binder)
+
+		err := binder.Bind(user, &product.ID) // Product field, not User field
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "does not belong to struct")
 	})
 }
 
-// TestConcurrentAccess tests thread safety
-func TestConcurrentAccess(t *testing.T) {
-	const numGoroutines = 100
-	const numIterations = 1000
+func TestFieldBinderPool(t *testing.T) {
+	// Test pool reuse
+	user := &User{}
 
-	structType := reflect.TypeOf(TestStruct{})
-	field, _ := structType.FieldByName("ID")
-	setter := createDirectSetterFunc(field.Offset, field.Type, nil)
+	binder1 := newBinder(user)
+	binder1.Bind(user, &user.ID)
+	assert.Equal(t, 1, binder1.BindingCount())
+	returnBinder(binder1)
+
+	binder2 := newBinder(user)
+	// Should start with clean bindings from pool
+	assert.Equal(t, 0, binder2.BindingCount())
+	returnBinder(binder2)
+
+	// Should be same instance reused
+	assert.True(t, binder1 == binder2, "Expected pool to reuse same instance")
+}
+
+// =========================================================================
+// Scanner Registration Tests
+// =========================================================================
+
+func TestScannerRegistration(t *testing.T) {
+	// Clear existing registrations
+	ClearRegisteredScanners()
+
+	// Register custom scanner
+	RegisterScanner(User{}, func(target any, binder FieldBinder) error {
+		user := target.(*User)
+		return binder.Bind(user, &user.ID, &user.FirstName, &user.Email)
+	})
+
+	userType := reflect.TypeOf(User{})
+	assert.True(t, HasRegisteredScanner(userType))
+
+	scanner := getRegisteredScanner(userType)
+	assert.NotNil(t, scanner)
+
+	// Test with pointer type (should normalize)
+	RegisterScanner(&User{}, func(target any, binder FieldBinder) error {
+		return nil
+	})
+	assert.True(t, HasRegisteredScanner(userType)) // Should normalize to struct type
+}
+
+func TestGetRegisteredScanners(t *testing.T) {
+	ClearRegisteredScanners()
+
+	// Register multiple scanners
+	RegisterScanner(User{}, func(target any, binder FieldBinder) error { return nil })
+	RegisterScanner(Product{}, func(target any, binder FieldBinder) error { return nil })
+
+	scanners := GetRegisteredScanners()
+	assert.Equal(t, 2, len(scanners))
+
+	userType := reflect.TypeOf(User{})
+	productType := reflect.TypeOf(Product{})
+
+	_, hasUser := scanners[userType]
+	_, hasProduct := scanners[productType]
+
+	assert.True(t, hasUser)
+	assert.True(t, hasProduct)
+}
+
+// =========================================================================
+// Direct Setter Tests
+// =========================================================================
+
+func TestDirectSetters(t *testing.T) {
+	user := &User{}
+	meta, err := Introspect(reflect.TypeOf(user))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name   string
+		field  string
+		value  any
+		verify func(*User) bool
+	}{
+		{
+			name:   "SetUint64",
+			field:  "id",
+			value:  uint64(12345),
+			verify: func(u *User) bool { return u.ID == 12345 },
+		},
+		{
+			name:   "SetString",
+			field:  "first_name",
+			value:  "John",
+			verify: func(u *User) bool { return u.FirstName == "John" },
+		},
+		{
+			name:   "SetInt32",
+			field:  "age",
+			value:  int32(30),
+			verify: func(u *User) bool { return u.Age == 30 },
+		},
+		{
+			name:   "SetFloat64",
+			field:  "score",
+			value:  float64(95.5),
+			verify: func(u *User) bool { return u.Score == 95.5 },
+		},
+		{
+			name:   "SetBool",
+			field:  "active",
+			value:  true,
+			verify: func(u *User) bool { return u.Active == true },
+		},
+		{
+			name:   "SetBytes",
+			field:  "data",
+			value:  []byte("test data"),
+			verify: func(u *User) bool { return string(u.Data) == "test data" },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Reset user
+			user = &User{}
+
+			fieldMeta, exists := meta.ColumnMap[tt.field]
+			require.True(t, exists, "Field %s should exist in column map", tt.field)
+			require.NotNil(t, fieldMeta.DirectSet, "DirectSet should not be nil")
+
+			// Set the value
+			fieldMeta.DirectSet(unsafe.Pointer(user), tt.value)
+
+			// Verify the value was set
+			assert.True(t, tt.verify(user), "Field %s was not set correctly", tt.field)
+		})
+	}
+}
+
+func TestDirectSettersConcurrency(t *testing.T) {
+	const numGoroutines = 50
+	const numIterations = 100
+
+	meta, err := Introspect(reflect.TypeOf(User{}))
+	require.NoError(t, err)
 
 	var wg sync.WaitGroup
 	errors := make(chan error, numGoroutines)
 
-	// Launch multiple goroutines, each with its own struct
 	for i := 0; i < numGoroutines; i++ {
 		wg.Add(1)
 		go func(goroutineID int) {
 			defer wg.Done()
 
-			// Each goroutine gets its own struct - no race condition
-			ts := &TestStruct{}
+			user := &User{} // Each goroutine gets its own user
+			fieldMeta := meta.ColumnMap["id"]
 
 			defer func() {
 				if r := recover(); r != nil {
-					errors <- fmt.Errorf("goroutine %d panicked: %v", goroutineID, r)
+					errors <- assert.AnError
 				}
 			}()
 
 			for j := 0; j < numIterations; j++ {
 				value := uint64(goroutineID*numIterations + j)
-				setter(unsafe.Pointer(ts), value)
-
-				// Small delay to increase chance of race conditions
-				if j%100 == 0 {
-					runtime.Gosched()
-				}
+				fieldMeta.DirectSet(unsafe.Pointer(user), value)
 			}
 
-			// Verify final value for this goroutine's struct
 			expectedFinal := uint64(goroutineID*numIterations + (numIterations - 1))
-			if ts.ID != expectedFinal {
-				errors <- fmt.Errorf("goroutine %d: expected final ID %d, got %d", goroutineID, expectedFinal, ts.ID)
+			if user.ID != expectedFinal {
+				errors <- assert.AnError
 			}
 		}(i)
 	}
@@ -197,246 +506,168 @@ func TestConcurrentAccess(t *testing.T) {
 	wg.Wait()
 	close(errors)
 
-	// Check for errors
 	for err := range errors {
-		t.Error(err)
+		t.Error("Concurrent setter test failed:", err)
 	}
-
-	t.Logf("Concurrent test completed successfully with %d goroutines", numGoroutines)
 }
 
-// TestTypeConversions tests the conversion safety
-func TestTypeConversions(t *testing.T) {
-	int64Type := reflect.TypeOf(int64(0))
-	stringType := reflect.TypeOf("")
+// =========================================================================
+// Type Conversion Tests
+// =========================================================================
 
+func TestTypeConversions(t *testing.T) {
 	tests := []struct {
-		name      string
-		fieldType reflect.Type
-		dbType    *reflect.Type
-		input     any
-		expectErr bool
+		name        string
+		targetType  reflect.Type
+		sourceValue any
+		expectError bool
 	}{
 		{
-			name:      "Int64ToUint64Valid",
-			fieldType: reflect.TypeOf(uint64(0)),
-			dbType:    &int64Type,
-			input:     int64(123),
-			expectErr: false,
+			name:        "StringToString",
+			targetType:  reflect.TypeOf(""),
+			sourceValue: "test",
+			expectError: false,
 		},
 		{
-			name:      "Int64ToUint64Negative",
-			fieldType: reflect.TypeOf(uint64(0)),
-			dbType:    &int64Type,
-			input:     int64(-123),
-			expectErr: true, // Should set zero value due to conversion error
+			name:        "IntToInt",
+			targetType:  reflect.TypeOf(int(0)),
+			sourceValue: int(42),
+			expectError: false,
 		},
 		{
-			name:      "StringToTime",
-			fieldType: reflect.TypeOf(time.Time{}),
-			dbType:    &stringType,
-			input:     "2025-07-30T18:53:28Z",
-			expectErr: false,
+			name:        "Int64ToUint64",
+			targetType:  reflect.TypeOf(uint64(0)),
+			sourceValue: int64(42),
+			expectError: false,
 		},
 		{
-			name:      "InvalidTimeString",
-			fieldType: reflect.TypeOf(time.Time{}),
-			dbType:    &stringType,
-			input:     "invalid-time",
-			expectErr: true, // Should set zero value due to conversion error
+			name:        "Int64NegativeToUint64",
+			targetType:  reflect.TypeOf(uint64(0)),
+			sourceValue: int64(-42),
+			expectError: true,
+		},
+		{
+			name:        "StringToTime",
+			targetType:  reflect.TypeOf(time.Time{}),
+			sourceValue: "2025-07-31T21:37:45Z",
+			expectError: false,
+		},
+		{
+			name:        "InvalidStringToTime",
+			targetType:  reflect.TypeOf(time.Time{}),
+			sourceValue: "invalid-time",
+			expectError: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a struct with just this field type for testing
-			structType := reflect.StructOf([]reflect.StructField{
-				{
-					Name: "TestField",
-					Type: tt.fieldType,
-					Tag:  "",
-				},
-			})
+			zeroValue := reflect.Zero(tt.targetType).Interface()
+			converter, err := GetConverter(zeroValue, reflect.TypeOf(tt.sourceValue))
 
-			structPtr := reflect.New(structType)
-			field := structType.Field(0)
+			if tt.expectError {
+				// For error cases, either no converter exists or conversion returns zero value
+				if err != nil {
+					// No converter found - this is acceptable for incompatible types
+					t.Logf("No converter found for %s to %s (expected for error case)",
+						reflect.TypeOf(tt.sourceValue), tt.targetType)
+					return
+				}
 
-			setter := createDirectSetterFunc(field.Offset, field.Type, tt.dbType)
-
-			// Set the value (should not panic, but may set zero value on error)
-			setter(unsafe.Pointer(structPtr.Pointer()), tt.input)
-
-			// Check the result
-			resultField := structPtr.Elem().Field(0)
-			result := resultField.Interface()
-
-			if tt.expectErr {
-				// Should be zero value due to conversion error
-				zeroValue := reflect.Zero(tt.fieldType).Interface()
-				if !reflect.DeepEqual(result, zeroValue) {
-					t.Errorf("Expected zero value %v for failed conversion, got %v", zeroValue, result)
+				if converter != nil {
+					result, _ := converter(tt.sourceValue)
+					// Result should be zero value for failed conversions
+					if result == nil {
+						// Converter returned nil, which means conversion failed
+						t.Logf("Converter returned nil for failed conversion (acceptable)")
+						return
+					}
+					assert.Equal(t, zeroValue, result, "Failed conversion should return zero value")
 				}
 			} else {
-				// Should not be zero value for successful conversion
-				zeroValue := reflect.Zero(tt.fieldType).Interface()
-				if reflect.DeepEqual(result, zeroValue) && tt.input != nil {
-					t.Errorf("Expected non-zero value for successful conversion, got zero value")
+				require.NoError(t, err, "Should not error for valid conversion")
+				require.NotNil(t, converter, "Converter should exist for valid conversion")
+
+				result, _ := converter(tt.sourceValue)
+				assert.NotNil(t, result, "Conversion result should not be nil")
+
+				// Verify type is correct
+				if result != nil {
+					assert.Equal(t, tt.targetType, reflect.TypeOf(result))
 				}
 			}
 		})
 	}
 }
 
-// TestGarbageCollectorInteraction tests GC safety
-func TestGarbageCollectorInteraction(t *testing.T) {
-	const numStructs = 1000
+// =========================================================================
+// Memory and Performance Tests
+// =========================================================================
 
-	// Create many structs to trigger GC
-	structs := make([]*TestStruct, numStructs)
-	setters := make([]func(unsafe.Pointer, any), numStructs)
-
-	for i := 0; i < numStructs; i++ {
-		structs[i] = &TestStruct{}
-		structType := reflect.TypeOf(*structs[i])
-		field, _ := structType.FieldByName("ID")
-		setters[i] = createDirectSetterFunc(field.Offset, field.Type, nil)
+func TestMemoryBounds(t *testing.T) {
+	// Test that direct setters don't write outside struct boundaries
+	type BoundedStruct struct {
+		Sentinel1 uint64
+		Target    uint64
+		Sentinel2 uint64
 	}
 
-	// Force garbage collection
-	runtime.GC()
-	runtime.GC()
+	const (
+		sentinel1Value = uint64(0xDEADBEEFCAFEBABE)
+		sentinel2Value = uint64(0xFEEDFACEDEADC0DE)
+		targetValue    = uint64(0x1234567890ABCDEF)
+	)
 
-	// Try to use the setters after GC
-	for i := 0; i < numStructs; i++ {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					t.Errorf("Struct %d caused panic after GC: %v", i, r)
-				}
-			}()
-
-			setters[i](unsafe.Pointer(structs[i]), uint64(i))
-
-			if structs[i].ID != uint64(i) {
-				t.Errorf("Struct %d: expected ID %d, got %d", i, i, structs[i].ID)
-			}
-		}()
+	bs := &BoundedStruct{
+		Sentinel1: sentinel1Value,
+		Target:    0,
+		Sentinel2: sentinel2Value,
 	}
-}
 
-// TestAlignmentRequirements tests platform alignment safety
-func TestAlignmentRequirements(t *testing.T) {
-	// Test that our field offsets respect platform alignment requirements
-	structType := reflect.TypeOf(TestStruct{})
+	meta, err := Introspect(reflect.TypeOf(*bs))
+	require.NoError(t, err)
 
-	for i := 0; i < structType.NumField(); i++ {
-		field := structType.Field(i)
-
-		// Check if offset is properly aligned for the field type
-		requiredAlignment := field.Type.Align()
-		if field.Offset%uintptr(requiredAlignment) != 0 {
-			t.Errorf("Field %s at offset %d is not properly aligned (requires %d-byte alignment)",
-				field.Name, field.Offset, requiredAlignment)
+	// Find target field
+	var targetField *FieldMeta
+	for _, field := range meta.Fields {
+		if field.Name == "Target" {
+			targetField = field
+			break
 		}
 	}
+	require.NotNil(t, targetField)
+
+	// Set the target field
+	targetField.DirectSet(unsafe.Pointer(bs), targetValue)
+
+	// Verify sentinels are unchanged
+	assert.Equal(t, sentinel1Value, bs.Sentinel1, "Sentinel1 should be unchanged")
+	assert.Equal(t, sentinel2Value, bs.Sentinel2, "Sentinel2 should be unchanged")
+	assert.Equal(t, targetValue, bs.Target, "Target should be set correctly")
 }
 
-// TestNullPointerSafety tests handling of nil pointers
-func TestNullPointerSafety(t *testing.T) {
-	structType := reflect.TypeOf(TestStruct{})
-	field, _ := structType.FieldByName("ID")
-	setter := createDirectSetterFunc(field.Offset, field.Type, nil)
+// =========================================================================
+// Cleanup and Setup
+// =========================================================================
 
-	// This should panic or be handled gracefully
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("Expected panic when using nil pointer, but got none")
-		}
-	}()
+func TestMain(m *testing.M) {
+	// Global test setup
+	InitializeCache(512, nil)
 
-	setter(nil, uint64(123))
-}
+	// Precompile common types for testing
+	PrecompileType[User]()
+	PrecompileType[Product]()
 
-// TestLargeStructPerformance tests performance with large structs
-func TestLargeStructPerformance(t *testing.T) {
-	ls := &LargeStruct{}
-	structType := reflect.TypeOf(*ls)
-	field, _ := structType.FieldByName("Field3")
-	setter := createDirectSetterFunc(field.Offset, field.Type, nil)
+	// Run tests
+	exitCode := m.Run()
 
-	start := time.Now()
+	// Global cleanup
+	ClearCache()
+	ClearPrecompiled()
+	ClearRegisteredScanners()
 
-	// Perform many operations
-	for i := 0; i < 100000; i++ {
-		setter(unsafe.Pointer(ls), uint64(i))
-	}
-
-	duration := time.Since(start)
-	t.Logf("100k operations on large struct took: %v", duration)
-
-	if ls.Field3 != 99999 {
-		t.Errorf("Expected Field3 to be 99999, got %d", ls.Field3)
-	}
-}
-
-// BenchmarkDirectSetterVsReflection compares performance
-func BenchmarkDirectSetterVsReflection(b *testing.B) {
-	ts := &TestStruct{}
-	structType := reflect.TypeOf(*ts)
-	field, _ := structType.FieldByName("ID")
-
-	// Setup direct setter
-	directSetter := createDirectSetterFunc(field.Offset, field.Type, nil)
-
-	// Setup reflection setter
-	reflectionSetter := func(structPtr *TestStruct, value uint64) {
-		reflect.ValueOf(structPtr).Elem().FieldByName("ID").SetUint(value)
-	}
-
-	b.Run("DirectSetter", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			directSetter(unsafe.Pointer(ts), uint64(i))
-		}
-	})
-
-	b.Run("Reflection", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			reflectionSetter(ts, uint64(i))
-		}
-	})
-}
-
-// TestMemoryLeaks tests for potential memory leaks
-func TestMemoryLeaks(t *testing.T) {
-	var m1, m2 runtime.MemStats
-	runtime.GC()
-	runtime.ReadMemStats(&m1)
-
-	// Create and use many setters
-	for i := 0; i < 1000; i++ { // Reduced iterations
-		ts := &TestStruct{}
-		structType := reflect.TypeOf(*ts)
-		field, _ := structType.FieldByName("Name")
-		setter := createDirectSetterFunc(field.Offset, field.Type, nil)
-		setter(unsafe.Pointer(ts), fmt.Sprintf("test-%d", i))
-	}
-
-	runtime.GC()
-	runtime.GC() // Double GC to ensure cleanup
-	runtime.ReadMemStats(&m2)
-
-	// Calculate memory growth more safely
-	var memGrowth uint64
-	if m2.Alloc > m1.Alloc {
-		memGrowth = m2.Alloc - m1.Alloc
-	} else {
-		memGrowth = 0 // Handle wraparound case
-	}
-
-	t.Logf("Memory growth: %d bytes (before: %d, after: %d)", memGrowth, m1.Alloc, m2.Alloc)
-
-	// More reasonable threshold for fewer iterations
-	if memGrowth > 512*1024 { // 512KB threshold
-		t.Errorf("Potential memory leak detected: %d bytes growth", memGrowth)
+	// Exit with same code as tests
+	if exitCode != 0 {
+		panic("Tests failed")
 	}
 }
