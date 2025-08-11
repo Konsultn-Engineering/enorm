@@ -1,102 +1,22 @@
 package ast
 
 import (
-	"fmt"
 	"github.com/Konsultn-Engineering/enorm/utils"
 	"hash/fnv"
-	"strconv"
 )
-
-type Column struct {
-	Table string
-	Name  string
-	Alias string
-}
-
-func (c *Column) Type() NodeType         { return NodeColumn }
-func (c *Column) Accept(v Visitor) error { return v.VisitColumn(c) }
-func (c *Column) Fingerprint() uint64 {
-	s := c.Table + "." + c.Name
-	return utils.FingerprintString(s)
-}
-
-type Table struct {
-	Schema string
-	Name   string
-	Alias  string
-}
-
-func (t *Table) Type() NodeType         { return NodeTable }
-func (t *Table) Accept(v Visitor) error { return v.VisitTable(t) }
-func (t *Table) Fingerprint() uint64 {
-	s := t.Schema + "." + t.Name + "." + t.Alias
-	return utils.FingerprintString(s)
-}
-
-type Value struct {
-	Val       interface{}
-	ValueType ValueType
-}
-
-func (v *Value) Type() NodeType           { return NodeValue }
-func (v *Value) Accept(vis Visitor) error { return vis.VisitValue(v) }
-func (v *Value) Fingerprint() uint64 {
-	s := "val:" + strconv.FormatInt(int64(v.Type()), 10) + ":" + fmt.Sprint(v.Val)
-	return utils.FingerprintString(s)
-}
-
-type ValueType int
-
-const (
-	ValueNull ValueType = iota
-	ValueBool
-	ValueInt
-	ValueFloat
-	ValueString
-	ValueTime
-)
-
-type Function struct {
-	Name string
-	Args []Node
-}
-
-func (f *Function) Type() NodeType         { return NodeFunction }
-func (f *Function) Accept(v Visitor) error { return v.VisitFunction(f) }
-func (f *Function) Fingerprint() uint64 {
-	h := fnv.New64a()
-	h.Write([]byte("func:" + f.Name))
-	for _, arg := range f.Args {
-		if fp, ok := arg.(Node); ok {
-			h.Write(utils.U64ToBytes(fp.Fingerprint()))
-		}
-	}
-	return h.Sum64()
-}
-
-type GroupedExpr struct {
-	Expr Node
-}
-
-func (g *GroupedExpr) Type() NodeType {
-	return NodeGroupedExpr
-}
-
-func (g *GroupedExpr) Accept(v Visitor) error {
-	return v.VisitGroupedExpr(g)
-}
-
-func (g *GroupedExpr) Fingerprint() uint64 {
-	if g.Expr == nil {
-		return 0
-	}
-	return g.Expr.Fingerprint()
-}
 
 type BinaryExpr struct {
 	Left     Node
 	Operator string
 	Right    Node
+}
+
+func NewBinaryExpr(left Node, op string, right Node) *BinaryExpr {
+	b := binaryExprPool.Get().(*BinaryExpr)
+	b.Left = left
+	b.Operator = op
+	b.Right = right
+	return b
 }
 
 func (b *BinaryExpr) Type() NodeType         { return NodeBinaryExpr }
@@ -113,9 +33,28 @@ func (b *BinaryExpr) Fingerprint() uint64 {
 	return h.Sum64()
 }
 
+func (b *BinaryExpr) Release() {
+	if releasable, ok := b.Left.(interface{ Release() }); ok {
+		releasable.Release()
+	}
+	if releasable, ok := b.Right.(interface{ Release() }); ok {
+		releasable.Release()
+	}
+	binaryExprPool.Put(b)
+}
+
 type UnaryExpr struct {
 	Operator string
 	Operand  Node
+	IsPrefix bool // Add this field
+}
+
+func NewUnaryExpr(left Node, op string, isPrefix bool) *UnaryExpr {
+	b := unaryExprPool.Get().(*UnaryExpr)
+	b.Operand = left
+	b.Operator = op
+	b.IsPrefix = isPrefix // Set the prefix flag
+	return b
 }
 
 func (u *UnaryExpr) Type() NodeType         { return NodeUnaryExpr }

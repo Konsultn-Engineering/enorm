@@ -1,302 +1,446 @@
 package query
 
 import (
-	"fmt"
-	"github.com/Konsultn-Engineering/enorm/cache"
-	"github.com/Konsultn-Engineering/enorm/dialect"
-	"github.com/Konsultn-Engineering/enorm/visitor"
-	"reflect"
-	"sync"
-	"unsafe"
-
 	"github.com/Konsultn-Engineering/enorm/ast"
-	"github.com/Konsultn-Engineering/enorm/schema"
+	"sync"
 )
 
-type SelectBuilder[T any] struct {
-	stmt       *ast.SelectStmt
-	tableName  string
-	ctx        *schema.Context
-	paramCount int
-
-	// Stack-allocated parameter storage for common cases
-	paramSlots [8]any
-	paramHeap  []any // Only allocated when > 8 params
-}
-
-// Builder pool for zero-allocation creation
-var selectBuilderPool = sync.Pool{
-	New: func() any {
-		return &SelectBuilder[any]{
-			stmt: ast.NewSelectStmt(),
-		}
-	},
-}
-
-func Select[T any](ctx *schema.Context) *SelectBuilder[T] {
-	// Get from pool (zero allocation)
-	b := selectBuilderPool.Get().(*SelectBuilder[any])
-
-	// Reset state
-	b.paramCount = 0
-	b.paramHeap = nil
-	b.ctx = ctx
-
-	// Get table name from schema metadata
-	var zero T
-	meta, _ := ctx.Introspect(reflect.TypeOf(zero))
-	b.tableName = meta.TableName
-
-	// Setup basic SELECT *
-	b.stmt.Columns = ast.AllColumns()
-	b.stmt.From = ast.NewTable(b.tableName)
-
-	return (*SelectBuilder[T])(unsafe.Pointer(b))
-}
-
-func (b *SelectBuilder[T]) Release() {
-	if b.stmt != nil {
-		b.stmt.Release()
-		b.stmt = nil
+var (
+	selectBuilderPool = sync.Pool{
+		New: func() any {
+			return &SelectBuilder{
+				stmt: ast.NewSelectStmt(),
+			}
+		},
 	}
-	b.paramCount = 0
-	b.paramHeap = nil
-	selectBuilderPool.Put((*SelectBuilder[any])(unsafe.Pointer(b)))
+)
+
+type SelectBuilder struct {
+	stmt        *ast.SelectStmt
+	schema      string
+	tableName   string
+	paramCount  int
+	visitor     ast.Visitor
+	parent      *SelectBuilder // Points to parent builder
+	firstChild  *SelectBuilder // Head of children linked list
+	nextSibling *SelectBuilder // Next child in parent's list
 }
 
-// Method chaining
-func (b *SelectBuilder[T]) Columns(columns ...string) *SelectBuilder[T] {
-	// Release existing columns
-	for _, col := range b.stmt.Columns {
-		if releasable, ok := col.(interface{ Release() }); ok {
-			releasable.Release()
-		}
+// NewSelectBuilder creates a new SelectBuilder instance
+func NewSelectBuilder(schema string, table string, visitor ast.Visitor) *SelectBuilder {
+	builder := selectBuilderPool.Get().(*SelectBuilder)
+
+	// Reset statement
+	builder.stmt = ast.NewSelectStmt()
+	builder.tableName = table
+	builder.paramCount = 0
+	builder.visitor = visitor
+
+	// Clear linked list pointers
+	builder.parent = nil
+	builder.firstChild = nil
+	builder.nextSibling = nil
+
+	if table != "" {
+		builder.stmt.From = ast.NewTable(schema, table, "")
 	}
 
-	b.stmt.Columns = ast.Columns(columns...)
-	return b
+	return builder
 }
 
-func (b *SelectBuilder[T]) Where(column string, value any) *SelectBuilder[T] {
-	b.addParam(value)
+// Release returns the builder to the pool
+func (sb *SelectBuilder) Release() {
+	// Release all children first (walk linked list)
+	child := sb.firstChild
+	for child != nil {
+		next := child.nextSibling
+		child.Release()
+		child = next
+	}
 
-	condition := ast.NewBinaryExpr(
-		ast.NewColumn(column),
-		"=",
-		ast.NewValue(value),
+	// Clear all links
+	sb.firstChild = nil
+	sb.parent = nil
+	sb.nextSibling = nil
+
+	// Release self
+	if sb.stmt != nil {
+		sb.stmt.Release()
+	}
+	sb.tableName = ""
+	sb.paramCount = 0
+	sb.visitor = nil
+	selectBuilderPool.Put(sb)
+}
+
+// whereWithOperator is the private helper that handles all WHERE logic
+func (sb *SelectBuilder) whereWithOperator(column string, sqlOp string, value any, logicalOp string) *SelectBuilder {
+	var condition ast.Node
+
+	switch sqlOp {
+	case ast.OpIn, ast.OpNotIn:
+		if values, ok := value.([]any); ok {
+			condition = ast.NewBinaryExpr(
+				ast.NewColumn(sb.tableName, column, ""),
+				sqlOp,
+				ast.NewArray(values),
+			)
+		} else {
+			// Handle single value as array
+			condition = ast.NewBinaryExpr(
+				ast.NewColumn(sb.tableName, column, ""),
+				sqlOp,
+				ast.NewArray([]any{value}),
+			)
+		}
+	case ast.OpIsNull, ast.OpIsNotNull:
+		condition = ast.NewUnaryExpr(
+			ast.NewColumn(sb.tableName, column, ""),
+			sqlOp,
+			false,
+		)
+	case ast.OpExists, ast.OpNotExists:
+		condition = ast.NewUnaryExpr(
+			ast.NewColumn(sb.tableName, column, ""),
+			sqlOp,
+			true,
+		)
+	case ast.OpBetween, ast.OpNotBetween:
+		//if values, ok := value.([]any); ok && len(values) == 2 {
+		//	condition = ast.NewBetweenExpr(
+		//		ast.NewColumn(sb.tableName, column, ""),
+		//		sqlOp,
+		//		ast.NewValue(values[0]),
+		//		ast.NewValue(values[1]),
+		//	)
+		//}
+	default:
+		condition = ast.NewBinaryExpr(
+			ast.NewColumn(sb.tableName, column, ""),
+			sqlOp,
+			ast.NewValue(value),
+		)
+	}
+
+	sb.stmt.AddWhereCondition(condition, logicalOp)
+	return sb
+}
+
+// Generic WHERE methods
+func (sb *SelectBuilder) Where(column string, operator string, value any) *SelectBuilder {
+	return sb.whereWithOperator(column, operator, value, ast.OpAnd)
+}
+
+func (sb *SelectBuilder) OrWhere(column string, operator string, value any) *SelectBuilder {
+	return sb.whereWithOperator(column, operator, value, ast.OpOr)
+}
+
+// AND WHERE methods
+func (sb *SelectBuilder) WhereEq(column string, value any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpEqual, value, ast.OpAnd)
+}
+
+func (sb *SelectBuilder) WhereNotEq(column string, value any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpNotEqual, value, ast.OpAnd)
+}
+
+func (sb *SelectBuilder) WhereIn(column string, values []any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpIn, values, ast.OpAnd)
+}
+
+func (sb *SelectBuilder) WhereNotIn(column string, values []any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpNotIn, values, ast.OpAnd)
+}
+
+func (sb *SelectBuilder) WhereLike(column string, pattern string) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpLike, pattern, ast.OpAnd)
+}
+
+func (sb *SelectBuilder) WhereNotLike(column string, pattern string) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpNotLike, pattern, ast.OpAnd)
+}
+
+func (sb *SelectBuilder) WhereGt(column string, value any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpGreaterThan, value, ast.OpAnd)
+}
+
+func (sb *SelectBuilder) WhereGte(column string, value any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpGreaterThanOrEqual, value, ast.OpAnd)
+}
+
+func (sb *SelectBuilder) WhereLt(column string, value any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpLessThan, value, ast.OpAnd)
+}
+
+func (sb *SelectBuilder) WhereLte(column string, value any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpLessThanOrEqual, value, ast.OpAnd)
+}
+
+func (sb *SelectBuilder) WhereIsNull(column string) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpIsNull, nil, ast.OpAnd)
+}
+
+func (sb *SelectBuilder) WhereIsNotNull(column string) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpIsNotNull, nil, ast.OpAnd)
+}
+
+func (sb *SelectBuilder) WhereBetween(column string, start, end any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpBetween, []any{start, end}, ast.OpAnd)
+}
+
+func (sb *SelectBuilder) WhereNotBetween(column string, start, end any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpNotBetween, []any{start, end}, ast.OpAnd)
+}
+
+func (sb *SelectBuilder) whereExists(subqueryFn func(*SelectBuilder), logicalOp string) *SelectBuilder {
+	subBuilder := NewSelectBuilder("", "", sb.visitor)
+
+	// Link child to parent (zero allocation)
+	sb.addChild(subBuilder)
+
+	subqueryFn(subBuilder)
+
+	condition := ast.NewUnaryExpr(
+		ast.NewSubqueryExpr(subBuilder.stmt),
+		ast.OpExists,
+		true,
 	)
 
-	if b.stmt.Where == nil {
-		b.stmt.Where = ast.NewWhereClause(condition)
-	} else {
-		// Combine with AND
-		existing := b.stmt.Where.Condition
-		b.stmt.Where.Condition = ast.NewBinaryExpr(existing, "AND", condition)
-	}
-
-	return b
+	sb.stmt.AddWhereCondition(condition, logicalOp)
+	return sb
 }
 
-func (b *SelectBuilder[T]) WhereIn(column string, values []any) *SelectBuilder[T] {
-	for _, v := range values {
-		b.addParam(v)
-	}
+func (sb *SelectBuilder) whereNotExists(subqueryFn func(*SelectBuilder), logicalOp string) *SelectBuilder {
+	subBuilder := NewSelectBuilder("", "", sb.visitor)
 
-	condition := ast.NewBinaryExpr(
-		ast.NewColumn(column),
-		"IN",
-		ast.NewArray(values),
+	// Link child to parent (zero allocation)
+	sb.addChild(subBuilder)
+
+	subqueryFn(subBuilder)
+
+	condition := ast.NewUnaryExpr(
+		ast.NewSubqueryExpr(subBuilder.stmt),
+		ast.OpNotExists,
+		true,
 	)
 
-	if b.stmt.Where == nil {
-		b.stmt.Where = ast.NewWhereClause(condition)
-	} else {
-		existing := b.stmt.Where.Condition
-		b.stmt.Where.Condition = ast.NewBinaryExpr(existing, "AND", condition)
-	}
-
-	return b
+	sb.stmt.AddWhereCondition(condition, logicalOp)
+	return sb
 }
 
-func (b *SelectBuilder[T]) WhereLike(column string, pattern string) *SelectBuilder[T] {
-	b.addParam(pattern)
+func (sb *SelectBuilder) WhereExists(subqueryFn func(*SelectBuilder)) *SelectBuilder {
+	return sb.whereExists(subqueryFn, ast.OpAnd)
+}
 
+func (sb *SelectBuilder) OrWhereExists(subqueryFn func(*SelectBuilder)) *SelectBuilder {
+	return sb.whereExists(subqueryFn, ast.OpOr)
+}
+
+func (sb *SelectBuilder) WhereNotExists(subqueryFn func(*SelectBuilder)) *SelectBuilder {
+	return sb.whereNotExists(subqueryFn, ast.OpAnd)
+}
+
+func (sb *SelectBuilder) OrWhereNotExists(subqueryFn func(*SelectBuilder)) *SelectBuilder {
+	return sb.whereNotExists(subqueryFn, ast.OpOr)
+}
+
+// OR WHERE methods
+func (sb *SelectBuilder) OrWhereEq(column string, value any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpEqual, value, ast.OpOr)
+}
+
+func (sb *SelectBuilder) OrWhereNotEq(column string, value any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpNotEqual, value, ast.OpOr)
+}
+
+func (sb *SelectBuilder) OrWhereIn(column string, values []any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpIn, values, ast.OpOr)
+}
+
+func (sb *SelectBuilder) OrWhereNotIn(column string, values []any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpNotIn, values, ast.OpOr)
+}
+
+func (sb *SelectBuilder) OrWhereLike(column string, pattern string) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpLike, pattern, ast.OpOr)
+}
+
+func (sb *SelectBuilder) OrWhereNotLike(column string, pattern string) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpNotLike, pattern, ast.OpOr)
+}
+
+func (sb *SelectBuilder) OrWhereGt(column string, value any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpGreaterThan, value, ast.OpOr)
+}
+
+func (sb *SelectBuilder) OrWhereGte(column string, value any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpGreaterThanOrEqual, value, ast.OpOr)
+}
+
+func (sb *SelectBuilder) OrWhereLt(column string, value any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpLessThan, value, ast.OpOr)
+}
+
+func (sb *SelectBuilder) OrWhereLte(column string, value any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpLessThanOrEqual, value, ast.OpOr)
+}
+
+func (sb *SelectBuilder) OrWhereIsNull(column string) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpIsNull, nil, ast.OpOr)
+}
+
+func (sb *SelectBuilder) OrWhereIsNotNull(column string) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpIsNotNull, nil, ast.OpOr)
+}
+
+func (sb *SelectBuilder) OrWhereBetween(column string, start, end any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpBetween, []any{start, end}, ast.OpOr)
+}
+
+func (sb *SelectBuilder) OrWhereNotBetween(column string, start, end any) *SelectBuilder {
+	return sb.whereWithOperator(column, ast.OpNotBetween, []any{start, end}, ast.OpOr)
+}
+
+func (sb *SelectBuilder) OrderByAsc(columns ...string) *SelectBuilder {
+	sb.stmt.AddOrderByClause(sb.tableName, false, columns...)
+	return sb
+}
+
+func (sb *SelectBuilder) OrderByDesc(columns ...string) *SelectBuilder {
+	sb.stmt.AddOrderByClause(sb.tableName, true, columns...)
+	return sb
+}
+
+func (sb *SelectBuilder) Limit(limit int) *SelectBuilder {
+	sb.stmt.Limit = ast.NewLimitClause(limit, nil)
+	return sb
+}
+
+func (sb *SelectBuilder) LimitOffset(limit, offset int) *SelectBuilder {
+	sb.stmt.Limit = ast.NewLimitClause(limit, &offset)
+	return sb
+}
+
+func (sb *SelectBuilder) Offset(offset int) *SelectBuilder {
+	sb.stmt.Limit.Offset = &offset
+	return sb
+}
+
+func (sb *SelectBuilder) InnerJoin(table string) *SelectBuilder {
+	sb.stmt.AddJoinClause(ast.JoinInner, "", table, "")
+	return sb
+}
+
+func (sb *SelectBuilder) On(leftCol, rightCol string) *SelectBuilder {
 	condition := ast.NewBinaryExpr(
-		ast.NewColumn(column),
-		"LIKE",
-		ast.NewValue(pattern),
+		ast.NewColumn(sb.tableName, leftCol, ""),
+		ast.OpEqual,
+		ast.NewColumn(sb.tableName, rightCol, ""),
 	)
-
-	if b.stmt.Where == nil {
-		b.stmt.Where = ast.NewWhereClause(condition)
-	} else {
-		existing := b.stmt.Where.Condition
-		b.stmt.Where.Condition = ast.NewBinaryExpr(existing, "AND", condition)
-	}
-
-	return b
+	sb.stmt.AddJoinCondition(ast.OpAnd, condition)
+	return sb
 }
 
-func (b *SelectBuilder[T]) OrderBy(column string, desc bool) *SelectBuilder[T] {
-	orderClause := ast.NewOrderByClause(ast.NewColumn(column), desc)
-	b.stmt.OrderBy = append(b.stmt.OrderBy, orderClause)
-	return b
-}
+//
+//func (b *SelectBuilder) LeftJoin(table string, leftCol, rightCol string) *SelectBuilder {
+//
+//}
+//
+//func (b *SelectBuilder) RightJoin(table string, leftCol, rightCol string) *SelectBuilder {
+//
+//}
+//
+//func (b *SelectBuilder) FullJoin(table string, leftCol, rightCol string) *SelectBuilder {
+//
+//}
+//
+//func (b *SelectBuilder) CrossJoin(table string) *SelectBuilder {
+//
+//}
+//
+//func (b *SelectBuilder) On() *SelectBuilder {
+//	// This method is a placeholder for future implementation
+//	return b
+//}
+//
+//func (b *SelectBuilder) GroupBy(columns ...string) *SelectBuilder {
+//	if len(columns) == 0 {
+//		return b
+//	}
+//	b.stmt.GroupBy = append(b.stmt.GroupBy, ast.Columns(columns...))
+//	return b
+//}
+//
+//func (b *SelectBuilder) Having(condition ast.Condition) *SelectBuilder {
+//
+//}
+//
+//func (b *SelectBuilder) HavingEq(column string, value any) *SelectBuilder {
+//	// This method is a placeholder for future implementation
+//	return b
+//}
+//
+//func (b *SelectBuilder) HavingNotEq(column string, value any) *SelectBuilder {
+//}
+//
+//func (b *SelectBuilder) HavingIn(column string, values []any) *SelectBuilder {
+//
+//}
+//
+//func (b *SelectBuilder) HavingNotIn(column string, values []any) *SelectBuilder {
+//
+//}
+//
+//func (b *SelectBuilder) HavingLike(column string, pattern string) *SelectBuilder {
+//
+//}
+//
+//func (b *SelectBuilder) HavingNotLike(column string, pattern string) *SelectBuilder {
+//
+//}
+//
+//func (b *SelectBuilder) HavingGt(column string, value any) *SelectBuilder {
+//
+//}
+//
+//func (b *SelectBuilder) HavingGte(column string, value any) *SelectBuilder {
+//
+//}
+//
+//func (b *SelectBuilder) HavingLt(column string, value any) *SelectBuilder {
+//
+//}
+//func (b *SelectBuilder) HavingLte(column string, value any) *SelectBuilder {
+//
+//}
+//func (b *SelectBuilder) HavingIsNull(column string) *SelectBuilder {
+//
+//}
+//func (b *SelectBuilder) HavingIsNotNull(column string) *SelectBuilder {
+//
+//}
+//
+//func (b *SelectBuilder) Fn() *SelectBuilder {
+//	// This method is a placeholder for future implementation
+//	return b
+//}
+//func (b *SelectBuilder) Count() *SelectBuilder {
+//}
+//
+//func (b *SelectBuilder) CountDistinct(column string) *SelectBuilder {
+//
+//}
 
-func (b *SelectBuilder[T]) OrderByAsc(column string) *SelectBuilder[T] {
-	return b.OrderBy(column, false)
-}
-
-func (b *SelectBuilder[T]) OrderByDesc(column string) *SelectBuilder[T] {
-	return b.OrderBy(column, true)
-}
-
-func (b *SelectBuilder[T]) Limit(limit int) *SelectBuilder[T] {
-	b.stmt.Limit = ast.Limit(limit)
-	return b
-}
-
-func (b *SelectBuilder[T]) LimitOffset(limit, offset int) *SelectBuilder[T] {
-	b.stmt.Limit = ast.LimitOffset(limit, offset)
-	return b
-}
-
-func (b *SelectBuilder[T]) InnerJoin(table string, leftCol, rightCol string) *SelectBuilder[T] {
-	condition := ast.JoinOn(b.tableName, leftCol, table, rightCol)
-	join := ast.InnerJoin(table, condition)
-	b.stmt.Joins = append(b.stmt.Joins, join)
-	return b
-}
-
-func (b *SelectBuilder[T]) LeftJoin(table string, leftCol, rightCol string) *SelectBuilder[T] {
-	condition := ast.JoinOn(b.tableName, leftCol, table, rightCol)
-	join := ast.LeftJoin(table, condition)
-	b.stmt.Joins = append(b.stmt.Joins, join)
-	return b
-}
-
-// Parameter management
-func (b *SelectBuilder[T]) addParam(value any) {
-	if b.paramCount < 8 {
-		b.paramSlots[b.paramCount] = value
-	} else {
-		if b.paramHeap == nil {
-			b.paramHeap = make([]any, 0, 16)
-		}
-		b.paramHeap = append(b.paramHeap, value)
-	}
-	b.paramCount++
-}
-
-func (b *SelectBuilder[T]) getParams() []any {
-	if b.paramCount <= 8 {
-		return b.paramSlots[:b.paramCount]
-	}
-
-	params := make([]any, b.paramCount)
-	copy(params, b.paramSlots[:8])
-	copy(params[8:], b.paramHeap)
-	return params
-}
-
-func (b *SelectBuilder[T]) Get() {
-	fmt.Println(b.stmt) // For debugging, replace with actual execution logic
-}
-
-// // Execution methods
-func (b *SelectBuilder[T]) ToSQL() (string, []any, error) {
-	v := visitor.NewSQLVisitor(dialect.NewPostgresDialect(), cache.NewQueryCache())
-	defer v.Release()
-
-	sql, args, err := v.Build(b.stmt)
+func (sb *SelectBuilder) Build() string {
+	build, _, err := sb.visitor.Build(sb.stmt)
 	if err != nil {
-		return "", nil, err
+		return ""
 	}
-
-	return sql, args, nil
+	return build
 }
 
-//
-//func (b *SelectBuilder[T]) First(ctx context.Context) (T, error) {
-//	var zero T
-//
-//	// Add LIMIT 1 for single record queries
-//	originalLimit := b.stmt.Limit
-//	if b.stmt.Limit == nil {
-//		b.stmt.Limit = ast.Limit(1)
-//	}
-//
-//	sql, args, err := b.ToSQL()
-//	if err != nil {
-//		return zero, err
-//	}
-//
-//	// Restore original limit
-//	if originalLimit == nil && b.stmt.Limit != nil {
-//		b.stmt.Limit.Release()
-//		b.stmt.Limit = originalLimit
-//	}
-//
-//	// Execute query using your existing database connection
-//	result, err := b.ctx.QueryOne(ctx, sql, args...)
-//	if err != nil {
-//		return zero, err
-//	}
-//
-//	return result.(T), nil
-//}
-//
-//func (b *SelectBuilder[T]) FindAll(ctx context.Context) ([]T, error) {
-//	sql, args, err := b.ToSQL()
-//	if err != nil {
-//		return nil, err
-//	}
-//
-//	// Execute query using your existing database connection
-//	results, err := b.ctx.QueryAll(ctx, sql, args...)
-//	if err != nil {
-//		return nil, err
-//	}
-//
-//	// Convert to typed slice
-//	typedResults := make([]T, len(results))
-//	for i, result := range results {
-//		typedResults[i] = result.(T)
-//	}
-//
-//	return typedResults, nil
-//}
-//
-//func (b *SelectBuilder[T]) Count(ctx context.Context) (int64, error) {
-//	// Save original columns
-//	originalColumns := b.stmt.Columns
-//
-//	// Replace with COUNT(*)
-//	b.stmt.Columns = []ast.Node{
-//		&ast.Function{
-//			Name: "COUNT",
-//			Args: []ast.Node{ast.NewColumn("*")},
-//		},
-//	}
-//
-//	sql, args, err := b.ToSQL()
-//	if err != nil {
-//		return 0, err
-//	}
-//
-//	// Restore original columns
-//	b.stmt.Columns = originalColumns
-//
-//	// Execute count query
-//	result, err := b.ctx.QueryScalar(ctx, sql, args...)
-//	if err != nil {
-//		return 0, err
-//	}
-//
-//	return result.(int64), nil
-//}
-
-//func (b *SelectBuilder[T]) Exists(ctx context.Context) (bool, error) {
-//	count, err := b.Count(ctx)
-//	return count > 0, err
-//}
+func (sb *SelectBuilder) addChild(child *SelectBuilder) {
+	child.parent = sb
+	child.nextSibling = sb.firstChild
+	sb.firstChild = child
+}

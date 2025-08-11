@@ -40,6 +40,10 @@ func NewSQLVisitor(d dialect.Dialect, q cache.QueryCache) *SQLVisitor {
 	return v
 }
 
+func (v *SQLVisitor) GetSB() *strings.Builder {
+	return &v.sb
+}
+
 func (v *SQLVisitor) Release() {
 	v.dialect = nil
 	v.qcache = nil
@@ -131,6 +135,12 @@ func (v *SQLVisitor) VisitSelect(s *ast.SelectStmt) error {
 		}
 	}
 
+	for _, join := range s.Joins {
+		if err := join.Table.Accept(v); err != nil {
+			return err
+		}
+	}
+
 	if s.Where != nil {
 		if err := s.Where.Accept(v); err != nil {
 			return err
@@ -143,11 +153,9 @@ func (v *SQLVisitor) VisitSelect(s *ast.SelectStmt) error {
 		}
 	}
 
-	for i, ord := range s.OrderBy {
-		if i > 0 {
-			v.sb.WriteString(", ")
-		}
-		if err := ord.Accept(v); err != nil {
+	//ORDERBY
+	if s.OrderBy != nil {
+		if err := s.OrderBy.Accept(v); err != nil {
 			return err
 		}
 	}
@@ -263,9 +271,18 @@ func (v *SQLVisitor) VisitBinaryExpr(expr *ast.BinaryExpr) error {
 }
 
 func (v *SQLVisitor) VisitUnaryExpr(expr *ast.UnaryExpr) error {
-	v.sb.WriteString(expr.Operator)
+	if expr.IsPrefix {
+		v.sb.WriteString(expr.Operator)
+		v.sb.WriteByte(' ')
+		return expr.Operand.Accept(v)
+	}
+
+	if err := expr.Operand.Accept(v); err != nil {
+		return err
+	}
 	v.sb.WriteByte(' ')
-	return expr.Operand.Accept(v)
+	v.sb.WriteString(expr.Operator)
+	return nil
 }
 
 func (v *SQLVisitor) VisitSubqueryExpr(s *ast.SubqueryExpr) error {
@@ -275,14 +292,97 @@ func (v *SQLVisitor) VisitSubqueryExpr(s *ast.SubqueryExpr) error {
 	return err
 }
 
-func (v *SQLVisitor) VisitWhereClause(w *ast.WhereClause) error {
+func (v *SQLVisitor) VisitWhereClause(clause *ast.WhereClause) error {
+	if clause == nil || clause.First == nil {
+		return nil
+	}
+
 	v.sb.WriteString(" WHERE ")
-	return w.Condition.Accept(v)
+
+	cond := clause.First
+	first := true
+
+	for cond != nil {
+		if !first {
+			v.sb.WriteString(" ")
+			v.sb.WriteString(cond.Operator)
+			v.sb.WriteString(" ")
+		}
+		first = false
+
+		if err := cond.Condition.Accept(v); err != nil {
+			return err
+		}
+
+		cond = cond.Next
+	}
+
+	return nil
 }
 
 func (v *SQLVisitor) VisitJoinClause(clause *ast.JoinClause) error {
-	//TODO implement me
+	if clause == nil || clause.Table == nil {
+		return nil
+	}
+
+	// JOIN <table>
+	v.sb.WriteByte(' ')
+	v.sb.WriteString(joinKeyword(clause.JoinType))
+	v.sb.WriteByte(' ')
+	if err := clause.Table.Accept(v); err != nil {
+		return err
+	}
+
+	// ON <cond1> [AND|OR <cond2> ...]
+	c := clause.Conditions
+	if c != nil && c.First != nil {
+		v.sb.WriteString(" ON ")
+
+		for n := c.First; n != nil; n = n.Next {
+			if n != c.First {
+				// write operator between conditions
+				if n.Operator != "" {
+					v.sb.WriteByte(' ')
+					v.sb.WriteString(n.Operator)
+					v.sb.WriteByte(' ')
+				} else {
+					v.sb.WriteString(" AND ") // default if unset
+				}
+			}
+
+			if n.Condition == nil {
+				// defensively emit a tautology
+				v.sb.WriteString("1=1")
+				continue
+			}
+
+			// Delegate rendering of the condition node
+			if err := n.Condition.Accept(v); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
+}
+
+// --- helpers ---
+
+func joinKeyword(t ast.JoinType) string {
+	switch t {
+	case ast.JoinInner:
+		return "JOIN" // INNER JOIN → JOIN
+	case ast.JoinLeft:
+		return "LEFT JOIN"
+	case ast.JoinRight:
+		return "RIGHT JOIN"
+	case ast.JoinFull:
+		return "FULL JOIN"
+	case ast.JoinCross:
+		return "CROSS JOIN"
+	default:
+		return "JOIN"
+	}
 }
 
 func (v *SQLVisitor) VisitGroupBy(g *ast.GroupByClause) error {
@@ -302,19 +402,62 @@ func (v *SQLVisitor) VisitGroupBy(g *ast.GroupByClause) error {
 }
 
 func (v *SQLVisitor) VisitOrderByClause(clause *ast.OrderByClause) error {
-	err := clause.Expr.Accept(v)
-
-	if clause.Desc {
-		v.sb.WriteString(" DESC")
+	if clause == nil {
+		return nil
 	}
-	return err
+
+	v.sb.WriteString(" ORDER BY ")
+
+	for clause != nil {
+		// Process current group
+		groupDesc := clause.Desc
+		firstInGroup := true
+
+		// Write all columns in current group
+		for clause != nil && clause.Desc == groupDesc && !clause.IsGroupEnd {
+			if !firstInGroup {
+				v.sb.WriteString(", ")
+			}
+			firstInGroup = false
+
+			if err := clause.Expr.Accept(v); err != nil {
+				return err
+			}
+
+			clause = clause.Next
+		}
+
+		// Handle the group end clause
+		if clause != nil {
+			if !firstInGroup {
+				v.sb.WriteString(", ")
+			}
+
+			if err := clause.Expr.Accept(v); err != nil {
+				return err
+			}
+
+			// Write group direction
+			if groupDesc {
+				v.sb.WriteString(" DESC")
+			} else {
+				v.sb.WriteString(" ASC")
+			}
+
+			// Move to next group
+			if clause.Next != nil {
+				v.sb.WriteString(", ")
+			}
+			clause = clause.Next
+		}
+	}
+
+	return nil
 }
 
 func (v *SQLVisitor) VisitLimitClause(clause *ast.LimitClause) error {
 	v.sb.WriteString(" LIMIT ")
-	if clause.Count != nil {
-		v.sb.WriteString(strconv.Itoa(*clause.Count))
-	}
+	v.sb.WriteString(strconv.Itoa(clause.Count))
 
 	if clause.Offset != nil {
 		v.sb.WriteString(" OFFSET ")

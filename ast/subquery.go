@@ -9,6 +9,12 @@ type SubqueryExpr struct {
 	Stmt Node
 }
 
+func NewSubqueryExpr(stmt Node) *SubqueryExpr {
+	s := subqueryExprPool.Get().(*SubqueryExpr)
+	s.Stmt = stmt
+	return s
+}
+
 func (s *SubqueryExpr) Type() NodeType {
 	return NodeSubqueryExpr
 }

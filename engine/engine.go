@@ -41,6 +41,20 @@ func New(db *sql.DB) *Engine {
 	}
 }
 
+func (e *Engine) GetVisitor() ast.Visitor {
+	if e.visitor == nil {
+		e.visitor = visitor.NewSQLVisitor(dialect.NewPostgresDialect(), e.qcache)
+	}
+	return e.visitor
+}
+
+func (e *Engine) GetSchema() *schema.Context {
+	if e.schema == nil {
+		e.schema = schema.New()
+	}
+	return e.schema
+}
+
 func (e *Engine) astFromCols(cols []string) []ast.Node {
 	// Create a cache key from column names
 	key := strings.Join(cols, ",")
