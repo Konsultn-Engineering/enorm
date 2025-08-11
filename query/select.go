@@ -332,12 +332,25 @@ func (sb *SelectBuilder) InnerJoin(table string) *SelectBuilder {
 }
 
 func (sb *SelectBuilder) On(leftCol, rightCol string) *SelectBuilder {
+	// Get the last join clause (the one just added by InnerJoin)
+	if len(sb.stmt.Joins) == 0 {
+		return sb // No join to add condition to
+	}
+
+	lastJoin := sb.stmt.Joins[len(sb.stmt.Joins)-1]
+
 	condition := ast.NewBinaryExpr(
-		ast.NewColumn(sb.tableName, leftCol, ""),
+		ast.NewColumn(sb.tableName, leftCol, ""), // Main table column
 		ast.OpEqual,
-		ast.NewColumn(sb.tableName, rightCol, ""),
+		ast.NewColumn(lastJoin.Table.Name, rightCol, ""), // Joined table column
 	)
-	sb.stmt.AddJoinCondition(ast.OpAnd, condition)
+
+	// Add condition to the specific join, not to the statement
+	if lastJoin.Conditions == nil {
+		lastJoin.Conditions = ast.NewJoinCondition()
+	}
+	lastJoin.Conditions.Append(ast.OpAnd, condition)
+
 	return sb
 }
 

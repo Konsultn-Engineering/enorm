@@ -130,13 +130,13 @@ func (v *SQLVisitor) VisitSelect(s *ast.SelectStmt) error {
 	}
 
 	if s.From != nil {
+		v.sb.WriteString(" FROM ")
 		if err := s.From.Accept(v); err != nil {
 			return err
 		}
 	}
-
 	for _, join := range s.Joins {
-		if err := join.Table.Accept(v); err != nil {
+		if err := join.Accept(v); err != nil {
 			return err
 		}
 	}
@@ -205,8 +205,6 @@ func (v *SQLVisitor) VisitColumn(c *ast.Column) error {
 }
 
 func (v *SQLVisitor) VisitTable(t *ast.Table) error {
-	v.sb.WriteString(" FROM ")
-
 	if t.Schema != "" {
 		v.sb.WriteString(v.dialect.QuoteIdentifier(t.Schema))
 		v.sb.WriteByte('.')

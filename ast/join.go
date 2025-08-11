@@ -33,6 +33,12 @@ type JoinCondition struct {
 	Tail  *JoinConditionNode
 }
 
+func NewJoinCondition() *JoinCondition {
+	c := joinConditionPool.Get().(*JoinCondition)
+	c.First, c.Tail = nil, nil
+	return c
+}
+
 func (c *JoinCondition) Append(op string, cond Node) *JoinConditionNode {
 	n := joinConditionNodePool.Get().(*JoinConditionNode)
 	n.Operator, n.Condition, n.Next = op, cond, nil

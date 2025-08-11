@@ -16,6 +16,13 @@ type Users struct {
 	Email     string `db:"column:email_id"`
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	Posts     HasMany[Post]
+}
+
+type Post struct {
+	ID      uint64
+	Title   string
+	Content string
 }
 
 func main() {
