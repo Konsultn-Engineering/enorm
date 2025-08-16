@@ -107,6 +107,15 @@ var (
 			return make([]string, 0, 8)
 		},
 	}
+
+	functionPool = sync.Pool{
+		New: func() any {
+			return &Function{
+				Name: "",
+				Args: make([]Node, 0, 10), // Preallocate with a reasonable size
+			}
+		},
+	}
 )
 
 // Helper to get appropriately sized node slice

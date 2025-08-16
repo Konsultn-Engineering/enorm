@@ -6,6 +6,7 @@ import (
 )
 
 type SelectStmt struct {
+	Distinct    bool
 	Columns     []Node
 	From        *Table
 	Joins       []*JoinClause
