@@ -1,12 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"github.com/Konsultn-Engineering/enorm/cache"
-	"github.com/Konsultn-Engineering/enorm/dialect"
+	"github.com/Konsultn-Engineering/enorm/connector"
+	"github.com/Konsultn-Engineering/enorm/engine"
 	_ "github.com/Konsultn-Engineering/enorm/providers/postgres"
-	"github.com/Konsultn-Engineering/enorm/query"
-	"github.com/Konsultn-Engineering/enorm/visitor"
 	"time"
 )
 
@@ -16,7 +15,14 @@ type Users struct {
 	Email     string `db:"column:email_id"`
 	CreatedAt time.Time
 	UpdatedAt time.Time
-	Posts     HasMany[Post]
+}
+
+type User struct {
+	ID        uint64
+	FirstName string
+	Email     string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 type Post struct {
@@ -26,22 +32,36 @@ type Post struct {
 }
 
 func main() {
-	v := visitor.NewSQLVisitor(dialect.NewPostgresDialect(), cache.NewQueryCache())
-	selectBuilder := query.NewSelectBuilder("", "table", v).WhereEq("column", "value").
-		WhereEq("abc", "def").
-		WhereIn("columns", []any{"value1", "value2"}).
-		WhereIsNull("column2").
-		WhereExists(func(sb *query.SelectBuilder) {
-			sb.WhereEq("column3", "value3")
-		}).
-		WhereNotExists(func(sb *query.SelectBuilder) {
-			sb.WhereEq("column4", "value4")
-		}).OrderByAsc("id", "name", "created_at").
-		OrderByDesc("updated_at", "another_field").
-		OrderByAsc("somefield").
-		InnerJoin("table").On("field", "field").
-		Limit(10).LimitOffset(10, 1).Offset(20)
+	enorm, err := connector.New("postgres", connector.Config{
+		Host:           "localhost",
+		Port:           5432,
+		Database:       "enorm_test",
+		Username:       "postgres",
+		Password:       "admin",
+		SSLMode:        "disable",
+		ConnectTimeout: 0,
+		QueryTimeout:   0,
+	})
 
-	fmt.Println(selectBuilder.Build())
-	selectBuilder.Release()
+	if err != nil {
+		panic(err)
+	}
+
+	en, err := enorm.Connect(context.Background())
+	if err != nil {
+		panic(err)
+	}
+
+	eng := engine.New(en.DB())
+
+	user := &User{}
+
+	query, err := eng.WhereLike("email", "%konsultn.com").FindOne(user)
+
+	fmt.Println(query)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(user)
 }

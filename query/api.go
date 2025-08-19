@@ -1,7 +1,10 @@
 package query
 
-type HasMany[T any] struct {
-}
+type HasMany[T any] struct{}
+
+type BelongsTo[T any] struct{}
+
+type BelongsToMany[T any, U any] struct{}
 
 type HasManyE[T any] []T
 

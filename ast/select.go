@@ -96,7 +96,6 @@ func (s *SelectStmt) AddWhereCondition(condition Node, operator string) {
 		s.Where.Tail = newCondition
 	}
 }
-
 func (s *SelectStmt) AddOrderByClause(table string, desc bool, columns ...string) {
 	if len(columns) == 0 {
 		return
@@ -119,7 +118,6 @@ func (s *SelectStmt) AddOrderByClause(table string, desc bool, columns ...string
 		}
 	}
 }
-
 func (s *SelectStmt) AddJoinClause(joinType JoinType, schema, name, alias string) {
 	join := NewJoinClause(joinType, schema, name, alias)
 	n := len(s.Joins)
@@ -130,7 +128,6 @@ func (s *SelectStmt) AddJoinClause(joinType JoinType, schema, name, alias string
 	}
 	s.Joins = append(s.Joins, join)
 }
-
 func (s *SelectStmt) AddJoinCondition(operator string, condition Node) {
 	if len(s.Joins) == 0 {
 		return // No joins to add conditions to

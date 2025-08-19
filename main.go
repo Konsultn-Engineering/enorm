@@ -3,16 +3,7 @@ package main
 import (
 	"github.com/Konsultn-Engineering/enorm/ast"
 	_ "github.com/Konsultn-Engineering/enorm/providers/postgres"
-	"time"
 )
-
-type User struct {
-	ID        uint64
-	FirstName string
-	Email     string
-	CreatedAt time.Time
-	UpdatedAt time.Time
-}
 
 func test() {
 	_ = ast.SelectStmt{

@@ -2,8 +2,6 @@ package engine
 
 import (
 	"context"
-	"fmt"
-	"github.com/Konsultn-Engineering/enorm/ast"
 	"github.com/Konsultn-Engineering/enorm/schema"
 	"os"
 	"reflect"
@@ -181,20 +179,17 @@ func BenchmarkFindOneStepByStep(b *testing.B) {
 		}
 	})
 
-	b.Run("QueryBuild", func(b *testing.B) {
-		meta, _ := e.schema.Introspect(reflect.TypeOf(user))
-		cols := []string{"id", "first_name", "email", "created_at", "updated_at"}
-
-		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
-			selectStmt := &ast.SelectStmt{
-				Columns: e.astFromCols(cols),
-				From:    &ast.Table{Name: meta.TableName},
-				Limit:   &ast.LimitClause{Count: ptr(1)},
-			}
-			e.visitor.Build(selectStmt)
-		}
-	})
+	//b.Run("QueryBuild", func(b *testing.B) {
+	//	meta, _ := e.schema.Introspect(reflect.TypeOf(user))
+	//	b.ResetTimer()
+	//	for i := 0; i < b.N; i++ {
+	//		selectStmt := &ast.SelectStmt{
+	//			From:  &ast.Table{Name: meta.TableName},
+	//			Limit: &ast.LimitClause{Count: 1},
+	//		}
+	//		e.visitor.Build(selectStmt)
+	//	}
+	//})
 
 	b.Run("DatabaseExecution", func(b *testing.B) {
 		query := "SELECT id, first_name, email, created_at, updated_at FROM users LIMIT 1"
@@ -222,92 +217,91 @@ func BenchmarkFindOneStepByStep(b *testing.B) {
 	})
 }
 
-func BenchmarkFindOneWithTiming(b *testing.B) {
-	user := &User{}
-
-	var (
-		introspectTime time.Duration
-		queryBuildTime time.Duration
-		dbExecTime     time.Duration
-		scanSetTime    time.Duration
-		totalTime      time.Duration
-	)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		start := time.Now()
-
-		// 1. Introspection
-		introspectStart := time.Now()
-		meta, err := e.schema.Introspect(reflect.TypeOf(user))
-		if err != nil {
-			b.Fatal(err)
-		}
-		introspectTime += time.Since(introspectStart)
-
-		// 2. Query Building
-		queryBuildStart := time.Now()
-		cols := []string{"id", "first_name", "email", "created_at", "updated_at"}
-		selectStmt := &ast.SelectStmt{
-			Columns: e.astFromCols(cols),
-			From:    &ast.Table{Name: meta.TableName},
-			Limit:   &ast.LimitClause{Count: ptr(1)},
-		}
-		query, _, err := e.visitor.Build(selectStmt)
-		if err != nil {
-			b.Fatal(err)
-		}
-		queryBuildTime += time.Since(queryBuildStart)
-
-		// 3. Database Execution
-		dbExecStart := time.Now()
-		rows, err := e.db.Query(query)
-		if err != nil {
-			b.Fatal(err)
-		}
-
-		if !rows.Next() {
-			rows.Close()
-			continue
-		}
-
-		scanVals := make([]any, len(cols))
-		scanPtrs := make([]any, len(cols))
-		for j := range scanVals {
-			scanPtrs[j] = &scanVals[j]
-		}
-
-		err = rows.Scan(scanPtrs...)
-		rows.Close()
-		if err != nil {
-			b.Fatal(err)
-		}
-		dbExecTime += time.Since(dbExecStart)
-
-		// 4. Scan and Set
-		scanSetStart := time.Now()
-		err = meta.ScanAndSet(user, cols, scanVals)
-		if err != nil {
-			b.Fatal(err)
-		}
-		scanSetTime += time.Since(scanSetStart)
-
-		totalTime += time.Since(start)
-	}
-
-	avgIntrospect := introspectTime / time.Duration(b.N)
-	avgQueryBuild := queryBuildTime / time.Duration(b.N)
-	avgDbExec := dbExecTime / time.Duration(b.N)
-	avgScanSet := scanSetTime / time.Duration(b.N)
-	avgTotal := totalTime / time.Duration(b.N)
-
-	fmt.Printf("\nDetailed Timing Breakdown (avg per operation):\n")
-	fmt.Printf("1. Introspect:   %v (%0.1f%%)\n", avgIntrospect, float64(introspectTime)/float64(totalTime)*100)
-	fmt.Printf("2. Query Build:  %v (%0.1f%%)\n", avgQueryBuild, float64(queryBuildTime)/float64(totalTime)*100)
-	fmt.Printf("3. DB Execution: %v (%0.1f%%)\n", avgDbExec, float64(dbExecTime)/float64(totalTime)*100)
-	fmt.Printf("4. Scan & Set:   %v (%0.1f%%)\n", avgScanSet, float64(scanSetTime)/float64(totalTime)*100)
-	fmt.Printf("5. Total:        %v\n", avgTotal)
-}
+//func BenchmarkFindOneWithTiming(b *testing.B) {
+//	user := &User{}
+//
+//	var (
+//		introspectTime time.Duration
+//		queryBuildTime time.Duration
+//		dbExecTime     time.Duration
+//		scanSetTime    time.Duration
+//		totalTime      time.Duration
+//	)
+//
+//	b.ResetTimer()
+//	for i := 0; i < b.N; i++ {
+//		start := time.Now()
+//
+//		// 1. Introspection
+//		introspectStart := time.Now()
+//		meta, err := e.schema.Introspect(reflect.TypeOf(user))
+//		if err != nil {
+//			b.Fatal(err)
+//		}
+//		introspectTime += time.Since(introspectStart)
+//
+//		// 2. Query Building
+//		queryBuildStart := time.Now()
+//		cols := []string{"id", "first_name", "email", "created_at", "updated_at"}
+//		selectStmt := &ast.SelectStmt{
+//			From:  &ast.Table{Name: meta.TableName},
+//			Limit: &ast.LimitClause{Count: 1},
+//		}
+//		query, _, err := e.visitor.Build(selectStmt)
+//		if err != nil {
+//			b.Fatal(err)
+//		}
+//		queryBuildTime += time.Since(queryBuildStart)
+//
+//		// 3. Database Execution
+//		dbExecStart := time.Now()
+//		rows, err := e.db.Query(query)
+//		if err != nil {
+//			b.Fatal(err)
+//		}
+//
+//		if !rows.Next() {
+//			rows.Close()
+//			continue
+//		}
+//
+//		scanVals := make([]any, len(cols))
+//		scanPtrs := make([]any, len(cols))
+//		for j := range scanVals {
+//			scanPtrs[j] = &scanVals[j]
+//		}
+//
+//		err = rows.Scan(scanPtrs...)
+//		rows.Close()
+//		if err != nil {
+//			b.Fatal(err)
+//		}
+//		dbExecTime += time.Since(dbExecStart)
+//
+//		// 4. Scan and Set
+//		scanSetStart := time.Now()
+//		err = meta.ScanAndSet(user, cols, scanVals)
+//		if err != nil {
+//			b.Fatal(err)
+//		}
+//		scanSetTime += time.Since(scanSetStart)
+//
+//		totalTime += time.Since(start)
+//	}
+//
+//	avgIntrospect := introspectTime / time.Duration(b.N)
+//	avgQueryBuild := queryBuildTime / time.Duration(b.N)
+//	avgDbExec := dbExecTime / time.Duration(b.N)
+//	avgScanSet := scanSetTime / time.Duration(b.N)
+//	avgTotal := totalTime / time.Duration(b.N)
+//
+//	fmt.Printf("\nDetailed Timing Breakdown (avg per operation):\n")
+//	fmt.Printf("1. Introspect:   %v (%0.1f%%)\n", avgIntrospect, float64(introspectTime)/float64(totalTime)*100)
+//	fmt.Printf("2. Query Build:  %v (%0.1f%%)\n", avgQueryBuild, float64(queryBuildTime)/float64(totalTime)*100)
+//	fmt.Printf("3. DB Execution: %v (%0.1f%%)\n", avgDbExec, float64(dbExecTime)/float64(totalTime)*100)
+//	fmt.Printf("4. Scan & Set:   %v (%0.1f%%)\n", avgScanSet, float64(scanSetTime)/float64(totalTime)*100)
+//	fmt.Printf("5. Total:        %v\n", avgTotal)
+//}
 
 func BenchmarkFindOneMemProfile(b *testing.B) {
 	f, err := os.Create("mem.prof")
