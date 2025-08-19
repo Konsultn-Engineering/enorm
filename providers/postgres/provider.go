@@ -19,10 +19,10 @@ func init() {
 }
 
 func (p *Provider) buildDSN(cfg connector.Config) string {
-	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s",
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?",
 		cfg.Username, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
 	if cfg.SSLMode != "" {
-		dsn += "?sslmode=" + cfg.SSLMode
+		dsn += "sslmode=" + cfg.SSLMode
 	}
 	return dsn
 }

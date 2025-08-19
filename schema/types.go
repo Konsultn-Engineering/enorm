@@ -32,6 +32,7 @@ type EntityMeta struct {
 	Fields    []*FieldMeta          // Ordered slice of all mappable fields
 	FieldMap  map[string]*FieldMeta // Go field name -> FieldMeta (e.g., "FirstName" -> FieldMeta)
 	ColumnMap map[string]*FieldMeta // Database column name -> FieldMeta (e.g., "first_name" -> FieldMeta)
+	Columns   []string
 
 	// Additional mappings for flexibility
 	AliasMapping map[string]string // Database column -> Go field name (e.g., "first_name" -> "FirstName")

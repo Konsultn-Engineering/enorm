@@ -88,7 +88,17 @@ func (b *Builder) Visitor() *visitor.SQLVisitor {
 	return b.visitor
 }
 
-func (b *Builder) GetStatement() *ast.SelectStmt {
+func (b *Builder) GetStatement(name, table string, cols []string) ast.Node {
+	if table != "" {
+		b.stmt.From = ast.NewTable("", table, "")
+	}
+
+	if len(b.stmt.Columns) == 0 {
+		for _, col := range cols {
+			b.stmt.Columns = append(b.stmt.Columns, ast.NewColumn(table, col, ""))
+		}
+	}
+
 	return b.stmt
 }
 
@@ -231,7 +241,17 @@ func (b *Builder) WhereExists(subqueryFn func(*Builder)) *Builder {
 }
 
 // Build method - using existing visitor pattern
-func (b *Builder) Build() (string, []interface{}, error) {
+func (b *Builder) Build(table string, cols []string) (string, []interface{}, error) {
+	if b.stmt.From == nil {
+		b.stmt.From = ast.NewTable("", table, "")
+	}
+
+	if len(b.stmt.Columns) == 0 {
+		for _, col := range cols {
+			b.stmt.Columns = append(b.stmt.Columns, ast.NewColumn(table, col, ""))
+		}
+	}
+
 	if b.HasErrors() {
 		return "", nil, b.GetFirstError()
 	}

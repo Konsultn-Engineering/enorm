@@ -23,6 +23,8 @@ type User struct {
 	Email     string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	Likes     int
+	Counter   uint64
 }
 
 type Post struct {
@@ -56,7 +58,7 @@ func main() {
 
 	user := &User{}
 
-	query, err := eng.WhereLike("email", "%konsultn.com").FindOne(user)
+	query, err := eng.FindOne(user)
 
 	fmt.Println(query)
 	if err != nil {

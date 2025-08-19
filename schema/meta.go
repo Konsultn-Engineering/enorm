@@ -40,6 +40,8 @@ func (ctx *Context) buildMeta(t reflect.Type) (*EntityMeta, error) {
 		}
 	}
 
+	columnSlice := make([]string, 0, exportedCount)
+
 	// Initialize metadata with exact capacity
 	meta := &EntityMeta{
 		Type:         t,
@@ -93,6 +95,8 @@ func (ctx *Context) buildMeta(t reflect.Type) (*EntityMeta, error) {
 			Generator:  parsedTag.GetGenerator(),
 		}
 
+		columnSlice = append(columnSlice, parsedTag.ColumnName)
+
 		// Set default column name if not specified
 		if fm.DBName == "" {
 			fm.DBName = ctx.namingStrategy.ColumnName(parsedTag.ColumnName) // Use context naming strategy
@@ -107,6 +111,7 @@ func (ctx *Context) buildMeta(t reflect.Type) (*EntityMeta, error) {
 		meta.ColumnMap[fm.DBName] = fm
 		meta.AliasMapping[fm.DBName] = f.Name
 	}
+	meta.Columns = columnSlice
 
 	// Check for custom scanner
 	if fn := getRegisteredScanner(t); fn != nil {

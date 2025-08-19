@@ -34,9 +34,9 @@ func init() {
 		Password: "admin",
 		SSLMode:  "disable",
 		Pool: connector.PoolConfig{
-			MaxOpen:     10,
-			MaxIdle:     5,
-			MaxLifetime: time.Hour,
+			MaxOpen:     50,
+			MaxIdle:     20,
+			MaxLifetime: 15 * time.Minute,
 		},
 	})
 

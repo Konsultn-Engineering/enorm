@@ -10,19 +10,22 @@ import (
 	"github.com/Konsultn-Engineering/enorm/schema"
 	"github.com/Konsultn-Engineering/enorm/visitor"
 	"reflect"
+	"sync"
 	"unsafe"
 )
 
 type Engine struct {
 	*query.Builder
-	db     *sql.DB
-	schema *schema.Context
+	db          *sql.DB
+	schema      *schema.Context
+	columnCache sync.Map // Cache column info per query
 }
 
 func New(db *sql.DB) *Engine {
 	qc := cache.NewQueryCache()
 	v := visitor.NewSQLVisitor(dialect.NewPostgresDialect(), qc)
 	builder := query.NewBuilder("", "", v)
+
 	return &Engine{
 		Builder: builder,
 		db:      db,
@@ -31,11 +34,87 @@ func New(db *sql.DB) *Engine {
 }
 
 // =============================================================================
+// EXECUTION METHODS
+// =============================================================================
+
+func (e *Engine) FindOne(dest any) (string, error) {
+	e.Limit(1)
+
+	meta, err := e.schema.Introspect(reflect.TypeOf(dest))
+	if err != nil {
+		return "", err
+	}
+
+	query, args, err := e.Builder.Build(meta.TableName, meta.Columns)
+	if err != nil {
+		return "", err
+	}
+
+	rows, err := e.db.Query(query, args...)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		return "", sql.ErrNoRows
+	}
+
+	columnNames, err := rows.Columns()
+	if err != nil {
+		return "", err
+	}
+
+	// Pre-resolve setters for performance
+	setters := make([]func(unsafe.Pointer, any), len(columnNames))
+	for i, colName := range columnNames {
+		if fieldMeta, exists := meta.ColumnMap[colName]; exists {
+			setters[i] = fieldMeta.DirectSet
+		}
+	}
+
+	// Prepare scan destinations
+	scanVals := make([]any, len(columnNames))
+	scanPtrs := make([]any, len(columnNames))
+	for i := range columnNames {
+		scanPtrs[i] = &scanVals[i]
+	}
+
+	err = rows.Scan(scanPtrs...)
+	if err != nil {
+		return "", err
+	}
+
+	// Fast struct hydration using unsafe pointers
+	structPtr := unsafe.Pointer(reflect.ValueOf(dest).Pointer())
+	for i, setter := range setters {
+		if setter != nil {
+			setter(structPtr, scanVals[i])
+		}
+	}
+
+	return query, nil
+}
+
+// FindMany optimized for batch operations
+func (e *Engine) FindMany(dest any, ids []any) (string, error) {
+	return "", nil
+}
+
+func (e *Engine) FindAll(dest any) (string, error) {
+	return "", nil
+}
+
+func (e *Engine) Exists() (bool, error) {
+	return false, nil
+}
+
+// =============================================================================
 // TABLE AND COLUMN SELECTION
 // =============================================================================
 
 func (e *Engine) Table(table string) *Engine {
-	e.Builder.GetStatement().From = ast.NewTable("", table, "")
+	//e.Builder.GetStatement().From = ast.NewTable("", table, "")
 	return e
 }
 
@@ -300,98 +379,6 @@ func (e *Engine) Max(column string) *Engine {
 }
 
 // =============================================================================
-// EXECUTION METHODS
-// =============================================================================
-
-func (e *Engine) FindOne(dest any) (string, error) {
-	e.Limit(1)
-
-	meta, err := e.schema.Introspect(reflect.TypeOf(dest))
-	if err != nil {
-		return "", err
-	}
-
-	stmt := e.Builder.GetStatement()
-
-	// Set table if not set
-	if stmt.From == nil {
-		stmt.From = ast.NewTable("", meta.TableName, "")
-	}
-
-	// Set columns if not set
-	if len(stmt.Columns) == 0 {
-		columns := e.getColumnsFromMeta(meta)
-		e.Builder.Select(columns)
-	}
-
-	query, args, err := e.Builder.Build()
-	if err != nil {
-		return "", err
-	}
-
-	rows, err := e.db.Query(query, args...)
-	if err != nil {
-		return "", err
-	}
-	defer rows.Close()
-
-	if !rows.Next() {
-		return "", sql.ErrNoRows
-	}
-
-	columnNames, err := rows.Columns()
-	if err != nil {
-		return "", err
-	}
-
-	// Pre-resolve setters for performance
-	setters := make([]func(unsafe.Pointer, any), len(columnNames))
-	for i, colName := range columnNames {
-		if fieldMeta, exists := meta.ColumnMap[colName]; exists {
-			setters[i] = fieldMeta.DirectSet
-		}
-	}
-
-	// Prepare scan destinations
-	scanVals := make([]any, len(columnNames))
-	scanPtrs := make([]any, len(columnNames))
-	for i := range columnNames {
-		scanPtrs[i] = &scanVals[i]
-	}
-
-	err = rows.Scan(scanPtrs...)
-	if err != nil {
-		return "", err
-	}
-
-	// Fast struct hydration using unsafe pointers
-	structPtr := unsafe.Pointer(reflect.ValueOf(dest).Pointer())
-	for i, setter := range setters {
-		if setter != nil {
-			setter(structPtr, scanVals[i])
-		}
-	}
-
-	return query, nil
-}
-
-func (e *Engine) FindAll(dest any) (string, error) {
-	// TODO: Implement similar to FindOne but for slices
-	return "", nil
-}
-
-func (e *Engine) Exists() (bool, error) {
-	query, args, err := e.Builder.Build()
-	if err != nil {
-		return false, err
-	}
-
-	var exists bool
-	err = e.db.QueryRow("SELECT EXISTS("+query+")", args...).Scan(&exists)
-	return exists, err
-}
-
-// =============================================================================
 // DATABASE OPERATIONS
 // =============================================================================
 
@@ -406,11 +393,8 @@ func (e *Engine) Close() error {
 // =============================================================================
 // HELPER METHODS
 // =============================================================================
-
-func (e *Engine) getColumnsFromMeta(meta *schema.EntityMeta) []string {
-	cols := make([]string, 0, len(meta.ColumnMap))
-	for colName := range meta.ColumnMap {
-		cols = append(cols, colName)
-	}
-	return cols
+// SetConnectionPool allows optimizing the connection pool
+func (e *Engine) SetConnectionPool(maxOpen, maxIdle int) {
+	e.db.SetMaxOpenConns(maxOpen)
+	e.db.SetMaxIdleConns(maxIdle)
 }
