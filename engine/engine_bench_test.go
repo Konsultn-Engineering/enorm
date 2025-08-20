@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"database/sql"
 	"github.com/Konsultn-Engineering/enorm/schema"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"os"
 	"reflect"
 	"runtime"
@@ -21,6 +23,8 @@ type User struct {
 	Email     string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	Likes     int
+	Counter   uint64
 }
 
 var e *Engine
@@ -45,18 +49,49 @@ func init() {
 	}
 	db, err := conn.Connect(context.Background())
 	db.DB().Exec("CREATE TABLE IF NOT EXISTS users (\n  id BIGSERIAL PRIMARY KEY,\n  first_name TEXT NOT NULL,\n  email TEXT NOT NULL,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n")
-	db.DB().Exec("INSERT INTO users (first_name, email) VALUES ('sol', 'sol@sol.com')")
+	db.DB().Exec("INSERT INTO users (first_name, email, likes, counter) VALUES ('sol', 'sol@sol.com', 100, 1000)")
 	if err != nil {
 		panic("Failed to connect: " + err.Error())
 	}
-	e = New(db.DB())
+	//e = NewWithPgx(db.DB())
+
+	// Create pgx pool directly without using connector
+	dsn := "postgres://postgres:admin@localhost:5432/enorm_test?sslmode=disable"
+
+	poolCfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		panic("Failed to parse config: " + err.Error())
+	}
+
+	poolCfg.MaxConns = 50
+	poolCfg.MinConns = 20
+	poolCfg.MaxConnLifetime = 15 * time.Minute
+
+	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
+	if err != nil {
+		panic("Failed to create pool: " + err.Error())
+	}
+
+	// Setup test data using pgx directly
+	_, err = pool.Exec(context.Background(), "CREATE TABLE IF NOT EXISTS users (\n  id BIGSERIAL PRIMARY KEY,\n  first_name TEXT NOT NULL,\n  email TEXT NOT NULL,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n")
+	if err != nil {
+		panic("Failed to create table: " + err.Error())
+	}
+
+	_, err = pool.Exec(context.Background(), "INSERT INTO users (first_name, email, likes, counter) VALUES ('sol', 'sol@sol.com', 100, 1000)")
+	if err != nil {
+		panic("Failed to insert data: " + err.Error())
+	}
+
+	// Use the new optimal engine
+	e = NewWithPgx(pool)
 
 }
 
 func BenchmarkFindOne(b *testing.B) {
 	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldBinder, ctx *schema.Context) error {
 		u := a.(*User)
-		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt)
+		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt, &u.Likes, &u.Counter)
 	})
 
 	u := User{}
@@ -72,6 +107,257 @@ func BenchmarkFindOne(b *testing.B) {
 	b.ReportAllocs()
 }
 
+func BenchmarkFindOne_Complete(b *testing.B) {
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		var user User
+		_, err := e.FindOne(&user)
+		if err != nil && err != sql.ErrNoRows {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkFindOne_SchemaIntrospect(b *testing.B) {
+	destType := reflect.TypeOf(&User{})
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_, err := e.schema.Introspect(destType)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkFindOne_QueryBuild(b *testing.B) {
+	defer e.db.Close()
+
+	meta, _ := e.schema.Introspect(reflect.TypeOf(&User{}))
+	e.Limit(1)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_, _, err := e.Builder.Build(meta.TableName, meta.Columns)
+		if err != nil {
+			b.Fatal(err)
+		}
+		// Reset builder state for next iteration
+		e.Limit(1)
+	}
+}
+
+func BenchmarkFindOne_DatabaseQuery(b *testing.B) {
+
+	meta, _ := e.schema.Introspect(reflect.TypeOf(&User{}))
+	e.Limit(1)
+	query, args, _ := e.Builder.Build(meta.TableName, meta.Columns)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		rows, err := e.db.Query(query, args...)
+		if err != nil {
+			b.Fatal(err)
+		}
+		rows.Close()
+	}
+}
+
+func BenchmarkFindOne_RowsProcessing(b *testing.B) {
+
+	meta, _ := e.schema.Introspect(reflect.TypeOf(&User{}))
+	e.Limit(1)
+	query, args, _ := e.Builder.Build(meta.TableName, meta.Columns)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		rows, err := e.db.Query(query, args...)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		if rows.Next() {
+			columnNames, err := rows.Columns()
+			if err != nil {
+				rows.Close()
+				b.Fatal(err)
+			}
+
+			vals := make([]any, len(columnNames))
+			ptrs := make([]any, len(columnNames))
+			for j := range vals {
+				ptrs[j] = &vals[j]
+			}
+
+			err = rows.Scan(ptrs...)
+			if err != nil {
+				rows.Close()
+				b.Fatal(err)
+			}
+		}
+		rows.Close()
+	}
+}
+
+func BenchmarkFindOne_ScanAndSet(b *testing.B) {
+	defer e.db.Close()
+
+	meta, _ := e.schema.Introspect(reflect.TypeOf(&User{}))
+
+	// Mock scan data
+	columnNames := []string{"id", "name", "email"}
+	vals := []any{int64(1), "John Doe", "john@example.com"}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		var user User
+		err := meta.ScanAndSet(&user, columnNames, vals)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkFindOne_SliceAllocation(b *testing.B) {
+	numCols := 3 // typical number of columns
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		vals := make([]any, numCols)
+		ptrs := make([]any, numCols)
+		for j := range vals {
+			ptrs[j] = &vals[j]
+		}
+		_ = vals
+		_ = ptrs
+	}
+}
+
+// Comparison benchmarks to isolate reflection overhead
+func BenchmarkFindOne_ReflectTypeOf(b *testing.B) {
+	var user User
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_ = reflect.TypeOf(&user)
+	}
+}
+
+func BenchmarkFindOne_UnsafePointer(b *testing.B) {
+	var user User
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		structVal := reflect.ValueOf(&user).Elem()
+		_ = unsafe.Pointer(structVal.UnsafeAddr())
+	}
+}
+
+func BenchmarkFindOne_RowsNext(b *testing.B) {
+
+	meta, _ := e.schema.Introspect(reflect.TypeOf(&User{}))
+	e.Limit(1)
+	query, args, _ := e.Builder.Build(meta.TableName, meta.Columns)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		rows, err := e.db.Query(query, args...)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		// JUST rows.Next()
+		hasNext := rows.Next()
+		_ = hasNext
+
+		rows.Close()
+	}
+}
+
+func BenchmarkFindOne_RowsScan(b *testing.B) {
+	meta, _ := e.schema.Introspect(reflect.TypeOf(&User{}))
+	e.Limit(1)
+	query, args, _ := e.Builder.Build(meta.TableName, meta.Columns)
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		rows, err := e.db.Query(query, args...)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		if rows.Next() {
+			// JUST the scan setup and scan
+			vals := make([]any, 7)
+			ptrs := make([]any, 7)
+			for j := range vals {
+				ptrs[j] = &vals[j]
+			}
+			err = rows.Scan(ptrs...)
+			if err != nil {
+				rows.Close()
+				b.Fatal(err)
+			}
+		}
+
+		rows.Close()
+	}
+}
+
+func BenchmarkRawPgxQuery(b *testing.B) {
+	// Use your exact same connection setup
+
+	query := "SELECT id, first_name, email, created_at, updated_at, likes, counter FROM users LIMIT 1"
+
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		rows, err := e.db.Query(query)
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		if rows.Next() {
+			var id int64
+			var firstName, email string
+			var createdAt, updatedAt time.Time
+			var likes int
+			var counter int64
+			err = rows.Scan(&id, &firstName, &email, &createdAt, &updatedAt, &likes, &counter)
+			if err != nil {
+				rows.Close()
+				b.Fatal(err)
+			}
+		}
+
+		rows.Close()
+	}
+}
+
+// Helper function to setup test engine and database
 func BenchmarkFindOneWithProfile(b *testing.B) {
 	// Create CPU profile
 	f, err := os.Create("cpu.prof")

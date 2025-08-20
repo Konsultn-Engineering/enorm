@@ -9,28 +9,60 @@ import (
 	"github.com/Konsultn-Engineering/enorm/query"
 	"github.com/Konsultn-Engineering/enorm/schema"
 	"github.com/Konsultn-Engineering/enorm/visitor"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"reflect"
 	"sync"
-	"unsafe"
 )
 
 type Engine struct {
 	*query.Builder
-	db          *sql.DB
+	db          Database // Changed to interface
 	schema      *schema.Context
-	columnCache sync.Map // Cache column info per query
+	columnCache sync.Map
+
+	// Pool for slice reuse (eliminates ~12-16 allocs)
+	scanPool         sync.Pool
+	queryStringCache map[string]string
+	cacheMu          sync.RWMutex
 }
 
 func New(db *sql.DB) *Engine {
+	return NewWithDatabase(&SqlDatabase{db: db})
+}
+
+func NewWithPgx(pool *pgxpool.Pool) *Engine {
+	return NewWithDatabase(&PgxDatabase{pool: pool})
+}
+
+func NewWithDatabase(db Database) *Engine {
 	qc := cache.NewQueryCache()
 	v := visitor.NewSQLVisitor(dialect.NewPostgresDialect(), qc)
 	builder := query.NewBuilder("", "", v)
 
-	return &Engine{
-		Builder: builder,
-		db:      db,
-		schema:  schema.New(),
+	e := &Engine{
+		Builder:          builder,
+		db:               db,
+		schema:           schema.New(),
+		queryStringCache: make(map[string]string, 64),
 	}
+
+	// Initialize pools
+	e.scanPool = sync.Pool{
+		New: func() interface{} {
+			vals := make([]any, 8)
+			ptrs := make([]any, 8)
+			// PRE-COMPUTE: Set up pointers once
+			for i := range ptrs {
+				ptrs[i] = &vals[i]
+			}
+			return &struct {
+				vals []any
+				ptrs []any
+			}{vals, ptrs}
+		},
+	}
+
+	return e
 }
 
 // =============================================================================
@@ -52,45 +84,46 @@ func (e *Engine) FindOne(dest any) (string, error) {
 
 	rows, err := e.db.Query(query, args...)
 	if err != nil {
-		return "", err
+		return query, err
 	}
 	defer rows.Close()
 
 	if !rows.Next() {
-		return "", sql.ErrNoRows
+		return query, sql.ErrNoRows
 	}
 
-	columnNames, err := rows.Columns()
-	if err != nil {
-		return "", err
-	}
+	// REPLACE YOUR CURRENT SLICE ALLOCATION WITH THIS:
+	scanRes := e.scanPool.Get().(*struct {
+		vals []any
+		ptrs []any
+	})
+	defer func() {
+		e.scanPool.Put(scanRes)
+	}()
 
-	// Pre-resolve setters for performance
-	setters := make([]func(unsafe.Pointer, any), len(columnNames))
-	for i, colName := range columnNames {
-		if fieldMeta, exists := meta.ColumnMap[colName]; exists {
-			setters[i] = fieldMeta.DirectSet
+	// Resize if needed (pointers already set up)
+	colCount := len(meta.Columns)
+	if cap(scanRes.vals) < colCount {
+		// Need to reallocate and rebuild pointers
+		scanRes.vals = make([]any, colCount)
+		scanRes.ptrs = make([]any, colCount)
+		for i := range scanRes.ptrs {
+			scanRes.ptrs[i] = &scanRes.vals[i]
 		}
+	} else {
+		// Just resize, pointers already correct
+		scanRes.vals = scanRes.vals[:colCount]
+		scanRes.ptrs = scanRes.ptrs[:colCount]
 	}
 
-	// Prepare scan destinations
-	scanVals := make([]any, len(columnNames))
-	scanPtrs := make([]any, len(columnNames))
-	for i := range columnNames {
-		scanPtrs[i] = &scanVals[i]
-	}
-
-	err = rows.Scan(scanPtrs...)
+	err = rows.Scan(scanRes.ptrs...)
 	if err != nil {
-		return "", err
+		return query, err
 	}
 
-	// Fast struct hydration using unsafe pointers
-	structPtr := unsafe.Pointer(reflect.ValueOf(dest).Pointer())
-	for i, setter := range setters {
-		if setter != nil {
-			setter(structPtr, scanVals[i])
-		}
+	err = meta.ScanAndSet(dest, meta.Columns, scanRes.vals)
+	if err != nil {
+		return query, err
 	}
 
 	return query, nil

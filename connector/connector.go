@@ -3,16 +3,9 @@ package connector
 import (
 	"context"
 	"database/sql"
-	"time"
-
 	"github.com/Konsultn-Engineering/enorm/dialect"
+	"time"
 )
-
-type Provider interface {
-	Connect(ctx context.Context, config Config) (Connection, error)
-	Dialect() dialect.Dialect
-	HealthCheck(ctx context.Context, conn Connection) error
-}
 
 type Connection interface {
 	DB() *sql.DB
