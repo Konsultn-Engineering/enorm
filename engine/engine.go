@@ -408,7 +408,10 @@ func (e *Engine) Health(ctx context.Context) error {
 }
 
 func (e *Engine) Close() error {
-	return e.db.Close()
+	if e.db != nil {
+		return e.db.Close()
+	}
+	return nil
 }
 
 // =============================================================================
