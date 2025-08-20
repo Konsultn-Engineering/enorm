@@ -5,48 +5,36 @@ import (
 	"database/sql"
 	"github.com/Konsultn-Engineering/enorm/ast"
 	"github.com/Konsultn-Engineering/enorm/cache"
-	"github.com/Konsultn-Engineering/enorm/dialect"
+	"github.com/Konsultn-Engineering/enorm/connector"
+	"github.com/Konsultn-Engineering/enorm/database"
 	"github.com/Konsultn-Engineering/enorm/query"
 	"github.com/Konsultn-Engineering/enorm/schema"
 	"github.com/Konsultn-Engineering/enorm/visitor"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"reflect"
 	"sync"
 )
 
 type Engine struct {
 	*query.Builder
-	db          Database // Changed to interface
-	schema      *schema.Context
-	columnCache sync.Map
-
-	// Pool for slice reuse (eliminates ~12-16 allocs)
+	db               database.Database
+	schema           *schema.Context
+	columnCache      sync.Map
 	scanPool         sync.Pool
 	queryStringCache map[string]string
 	cacheMu          sync.RWMutex
 }
 
-func New(db *sql.DB) *Engine {
-	return NewWithDatabase(&SqlDatabase{db: db})
-}
-
-func NewWithPgx(pool *pgxpool.Pool) *Engine {
-	return NewWithDatabase(&PgxDatabase{pool: pool})
-}
-
-func NewWithDatabase(db Database) *Engine {
+func New(conn connector.Connection) *Engine {
 	qc := cache.NewQueryCache()
-	v := visitor.NewSQLVisitor(dialect.NewPostgresDialect(), qc)
-	builder := query.NewBuilder("", "", v)
+	v := visitor.NewSQLVisitor(conn.Dialect(), qc)
 
 	e := &Engine{
-		Builder:          builder,
-		db:               db,
+		Builder:          query.NewBuilder("", "", v),
+		db:               conn.Database(),
 		schema:           schema.New(),
 		queryStringCache: make(map[string]string, 64),
 	}
 
-	// Initialize pools
 	e.scanPool = sync.Pool{
 		New: func() interface{} {
 			vals := make([]any, 8)

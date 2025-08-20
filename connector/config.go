@@ -13,6 +13,14 @@ type Config struct {
 	Pool           PoolConfig        `json:"pool" yaml:"pool"`
 	ConnectTimeout time.Duration     `json:"connect_timeout" yaml:"connect_timeout"`
 	QueryTimeout   time.Duration     `json:"query_timeout" yaml:"query_timeout"`
+	Retry          *RetryConfig      `json:"retry,omitempty" yaml:"retry,omitempty"`
+}
+
+type RetryConfig struct {
+	MaxRetries int           `json:"max_retries" yaml:"max_retries"`
+	BaseDelay  time.Duration `json:"base_delay" yaml:"base_delay"`
+	MaxDelay   time.Duration `json:"max_delay" yaml:"max_delay"`
+	Backoff    float64       `json:"backoff" yaml:"backoff"` // Multiplier (e.g., 2.0 for exponential)
 }
 
 type PoolConfig struct {

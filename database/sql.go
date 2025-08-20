@@ -1,4 +1,4 @@
-package engine
+package database
 
 import (
 	"context"
@@ -7,6 +7,10 @@ import (
 
 type SqlDatabase struct {
 	db *sql.DB
+}
+
+func NewSqlDatabase(db *sql.DB) *SqlDatabase {
+	return &SqlDatabase{db: db}
 }
 
 func (s *SqlDatabase) Query(query string, args ...interface{}) (Rows, error) {

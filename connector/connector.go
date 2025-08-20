@@ -4,31 +4,25 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"github.com/Konsultn-Engineering/enorm/database"
 	"github.com/Konsultn-Engineering/enorm/dialect"
-	"github.com/Konsultn-Engineering/enorm/engine"
 )
 
 // Keep your existing interfaces and config structs exactly as-is
 type Connection interface {
 	DB() *sql.DB
-	Engine() *engine.Engine // Add this method
+	Database() database.Database
 	Dialect() dialect.Dialect
 	Health(ctx context.Context) error
 	Stats() ConnectionStats
 	Close() error
 }
 
-type Connector interface {
-	Connect(ctx context.Context) (Connection, error)
-	ConnectWithRetry(ctx context.Context, opts RetryOptions) (Connection, error)
-	Close() error
-}
-
 // Replace the registration pattern with a simple factory
-func New(driver string, cfg Config) (Connector, error) {
+func New(driver string, cfg Config) (Connection, error) {
 	switch driver {
 	case "postgres":
-		return newPostgresConnector(cfg), nil
+		return newPostgresConnector(cfg)
 	case "mysql":
 		//return newMySQLConnector(cfg), nil // future
 	case "sqlite":

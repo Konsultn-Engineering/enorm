@@ -1,4 +1,4 @@
-package engine
+package database
 
 import (
 	"context"
@@ -9,6 +9,10 @@ import (
 
 type PgxDatabase struct {
 	pool *pgxpool.Pool
+}
+
+func NewPgxDatabase(pool *pgxpool.Pool) *PgxDatabase {
+	return &PgxDatabase{pool: pool}
 }
 
 func (p *PgxDatabase) Query(query string, args ...interface{}) (Rows, error) {
