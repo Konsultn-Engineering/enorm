@@ -8,7 +8,7 @@ import (
 	"github.com/Konsultn-Engineering/enorm/dialect"
 )
 
-// Keep your existing interfaces and config structs exactly as-is
+// Connection represents a database connection with associated metadata.
 type Connection interface {
 	DB() *sql.DB
 	Database() database.Database
@@ -18,17 +18,35 @@ type Connection interface {
 	Close() error
 }
 
-// Replace the registration pattern with a simple factory
+// ClusterConnection represents a connection to a database cluster.
+type ClusterConnection interface {
+	Connection
+	Primary() Connection
+	Replicas() []Connection
+	Read(ctx context.Context) Connection
+	Write(ctx context.Context) Connection
+}
+
+// New creates a new database connection for the specified driver.
 func New(driver string, cfg Config) (Connection, error) {
 	switch driver {
 	case "postgres":
 		return newPostgresConnector(cfg)
-	case "mysql":
-		//return newMySQLConnector(cfg), nil // future
-	case "sqlite":
-		//return newSQLiteConnector(cfg), nil // future
 	default:
 		return nil, fmt.Errorf("unsupported driver: %s", driver)
 	}
-	return nil, fmt.Errorf("unsupported driver: %s", driver)
+}
+
+// NewCluster creates a new cluster connection for the specified driver.
+func NewCluster(driver string, cfg ClusterConfig) (ClusterConnection, error) {
+	if err := cfg.ValidateCluster(); err != nil {
+		return nil, fmt.Errorf("invalid cluster config: %w", err)
+	}
+
+	switch driver {
+	case "postgres":
+		return newPostgresCluster(cfg)
+	default:
+		return nil, fmt.Errorf("unsupported driver for cluster: %s", driver)
+	}
 }

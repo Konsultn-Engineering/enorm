@@ -5,7 +5,8 @@ import (
 	"time"
 )
 
-func retryConnect(ctx context.Context, opts RetryConfig, connectFn func(context.Context) error) error {
+// retryConnect executes a connection function with exponential backoff retry logic.
+func retryConnect(ctx context.Context, opts *RetryConfig, connectFn func(context.Context) error) error {
 	var err error
 	delay := opts.BaseDelay
 	if delay == 0 {
@@ -14,7 +15,7 @@ func retryConnect(ctx context.Context, opts RetryConfig, connectFn func(context.
 
 	backoff := opts.Backoff
 	if backoff <= 0 {
-		backoff = 2.0 // Default exponential backoff
+		backoff = 2.0
 	}
 
 	for i := 0; i < opts.MaxRetries; i++ {
@@ -32,7 +33,6 @@ func retryConnect(ctx context.Context, opts RetryConfig, connectFn func(context.
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(delay):
-			// Apply backoff multiplier
 			delay = time.Duration(float64(delay) * backoff)
 			if delay > opts.MaxDelay && opts.MaxDelay > 0 {
 				delay = opts.MaxDelay

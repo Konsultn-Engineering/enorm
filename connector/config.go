@@ -1,7 +1,11 @@
 package connector
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
+// Config represents database connection configuration.
 type Config struct {
 	Host           string            `json:"host" yaml:"host"`
 	Port           int               `json:"port" yaml:"port"`
@@ -16,13 +20,7 @@ type Config struct {
 	Retry          *RetryConfig      `json:"retry,omitempty" yaml:"retry,omitempty"`
 }
 
-type RetryConfig struct {
-	MaxRetries int           `json:"max_retries" yaml:"max_retries"`
-	BaseDelay  time.Duration `json:"base_delay" yaml:"base_delay"`
-	MaxDelay   time.Duration `json:"max_delay" yaml:"max_delay"`
-	Backoff    float64       `json:"backoff" yaml:"backoff"` // Multiplier (e.g., 2.0 for exponential)
-}
-
+// PoolConfig defines connection pool settings.
 type PoolConfig struct {
 	MaxOpen         int           `json:"max_open" yaml:"max_open"`
 	MaxIdle         int           `json:"max_idle" yaml:"max_idle"`
@@ -31,9 +29,43 @@ type PoolConfig struct {
 	HealthCheckFreq time.Duration `json:"health_check_freq" yaml:"health_check_freq"`
 }
 
+// RetryConfig defines connection retry behavior.
+type RetryConfig struct {
+	MaxRetries int           `json:"max_retries" yaml:"max_retries"`
+	BaseDelay  time.Duration `json:"base_delay" yaml:"base_delay"`
+	MaxDelay   time.Duration `json:"max_delay" yaml:"max_delay"`
+	Backoff    float64       `json:"backoff" yaml:"backoff"`
+}
+
+// ClusterConfig defines primary-replica database cluster configuration.
 type ClusterConfig struct {
-	Primary       Config   `json:"primary" yaml:"primary"`
-	Replicas      []Config `json:"replicas" yaml:"replicas"`
-	ReadStrategy  string
-	WriteStrategy string
+	Primary       Config        `json:"primary" yaml:"primary"`
+	Replicas      []Config      `json:"replicas" yaml:"replicas"`
+	ReadStrategy  string        `json:"read_strategy" yaml:"read_strategy"`
+	WriteStrategy string        `json:"write_strategy" yaml:"write_strategy"`
+	FailoverDelay time.Duration `json:"failover_delay" yaml:"failover_delay"`
+}
+
+// ValidateCluster validates cluster configuration.
+func (cc *ClusterConfig) ValidateCluster() error {
+	if cc.Primary.Host == "" {
+		return fmt.Errorf("primary host is required")
+	}
+
+	validStrategies := map[string]bool{
+		"round_robin": true,
+		"random":      true,
+		"primary":     true,
+		"closest":     true,
+	}
+
+	if cc.ReadStrategy != "" && !validStrategies[cc.ReadStrategy] {
+		return fmt.Errorf("invalid read strategy: %s", cc.ReadStrategy)
+	}
+
+	if cc.WriteStrategy != "" && cc.WriteStrategy != "primary" {
+		return fmt.Errorf("invalid write strategy: %s (only 'primary' supported)", cc.WriteStrategy)
+	}
+
+	return nil
 }

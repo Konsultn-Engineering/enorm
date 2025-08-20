@@ -1,14 +1,12 @@
-// In connector/dsn.go
 package connector
 
 import (
-	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
 )
 
-// DSNBuilder provides a fluent interface for building database connection strings
+// DSNBuilder provides a fluent interface for building database connection strings.
 type DSNBuilder struct {
 	scheme   string
 	username string
@@ -19,7 +17,7 @@ type DSNBuilder struct {
 	params   map[string]string
 }
 
-// NewDSNBuilder creates a new DSN builder
+// NewDSNBuilder creates a new DSN builder for the specified scheme.
 func NewDSNBuilder(scheme string) *DSNBuilder {
 	return &DSNBuilder{
 		scheme: scheme,
@@ -27,27 +25,27 @@ func NewDSNBuilder(scheme string) *DSNBuilder {
 	}
 }
 
-// Auth sets username and password
+// Auth sets the username and password for authentication.
 func (b *DSNBuilder) Auth(username, password string) *DSNBuilder {
 	b.username = username
 	b.password = password
 	return b
 }
 
-// Host sets the host and port
+// Host sets the database host and port.
 func (b *DSNBuilder) Host(host string, port int) *DSNBuilder {
 	b.host = host
 	b.port = port
 	return b
 }
 
-// Database sets the database name
+// Database sets the database name.
 func (b *DSNBuilder) Database(name string) *DSNBuilder {
 	b.database = name
 	return b
 }
 
-// Param adds a single parameter
+// Param adds a single parameter to the DSN.
 func (b *DSNBuilder) Param(key, value string) *DSNBuilder {
 	if value != "" {
 		b.params[key] = value
@@ -55,7 +53,7 @@ func (b *DSNBuilder) Param(key, value string) *DSNBuilder {
 	return b
 }
 
-// Params adds multiple parameters
+// Params adds multiple parameters to the DSN.
 func (b *DSNBuilder) Params(params map[string]string) *DSNBuilder {
 	for k, v := range params {
 		if v != "" {
@@ -65,23 +63,7 @@ func (b *DSNBuilder) Params(params map[string]string) *DSNBuilder {
 	return b
 }
 
-// Add defaults for common parameters
-func (b *DSNBuilder) WithPostgresDefaults() *DSNBuilder {
-	return b.Param("sslmode", "prefer").
-		Param("connect_timeout", "10")
-}
-
-func (b *DSNBuilder) Validate() error {
-	if b.host == "" {
-		return fmt.Errorf("host is required")
-	}
-	if b.port <= 0 || b.port > 65535 {
-		return fmt.Errorf("invalid port: %d", b.port)
-	}
-	return nil
-}
-
-// Build constructs the final DSN string
+// Build constructs and returns the final DSN string.
 func (b *DSNBuilder) Build() string {
 	var dsn strings.Builder
 

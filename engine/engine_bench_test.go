@@ -1,10 +1,9 @@
 package engine
 
 import (
-	"context"
 	"database/sql"
+	"github.com/Konsultn-Engineering/enorm/connector"
 	"github.com/Konsultn-Engineering/enorm/schema"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"os"
 	"reflect"
 	"runtime"
@@ -12,9 +11,6 @@ import (
 	"testing"
 	"time"
 	"unsafe"
-
-	"github.com/Konsultn-Engineering/enorm/connector"
-	_ "github.com/Konsultn-Engineering/enorm/providers/postgres"
 )
 
 type User struct {
@@ -47,44 +43,10 @@ func init() {
 	if err != nil {
 		panic("Failed to init connector: " + err.Error())
 	}
-	db, err := conn.Connect(context.Background())
-	db.DB().Exec("CREATE TABLE IF NOT EXISTS users (\n  id BIGSERIAL PRIMARY KEY,\n  first_name TEXT NOT NULL,\n  email TEXT NOT NULL,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n")
-	db.DB().Exec("INSERT INTO users (first_name, email, likes, counter) VALUES ('sol', 'sol@sol.com', 100, 1000)")
-	if err != nil {
-		panic("Failed to connect: " + err.Error())
-	}
-	//e = NewWithPgx(db.DB())
+	conn.DB().Exec("CREATE TABLE IF NOT EXISTS users (\n  id BIGSERIAL PRIMARY KEY,\n  first_name TEXT NOT NULL,\n  email TEXT NOT NULL,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n")
+	conn.DB().Exec("INSERT INTO users (first_name, email, likes, counter) VALUES ('sol', 'sol@sol.com', 100, 1000)")
 
-	// Create pgx pool directly without using connector
-	dsn := "postgres://postgres:admin@localhost:5432/enorm_test?sslmode=disable"
-
-	poolCfg, err := pgxpool.ParseConfig(dsn)
-	if err != nil {
-		panic("Failed to parse config: " + err.Error())
-	}
-
-	poolCfg.MaxConns = 50
-	poolCfg.MinConns = 20
-	poolCfg.MaxConnLifetime = 15 * time.Minute
-
-	pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
-	if err != nil {
-		panic("Failed to create pool: " + err.Error())
-	}
-
-	// Setup test data using pgx directly
-	_, err = pool.Exec(context.Background(), "CREATE TABLE IF NOT EXISTS users (\n  id BIGSERIAL PRIMARY KEY,\n  first_name TEXT NOT NULL,\n  email TEXT NOT NULL,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\n);\n")
-	if err != nil {
-		panic("Failed to create table: " + err.Error())
-	}
-
-	_, err = pool.Exec(context.Background(), "INSERT INTO users (first_name, email, likes, counter) VALUES ('sol', 'sol@sol.com', 100, 1000)")
-	if err != nil {
-		panic("Failed to insert data: " + err.Error())
-	}
-
-	// Use the new optimal engine
-	e = NewWithPgx(pool)
+	e = New(conn)
 
 }
 
