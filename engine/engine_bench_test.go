@@ -43,8 +43,8 @@ func init() {
 	if err != nil {
 		panic("Failed to init connector: " + err.Error())
 	}
-	conn.DB().Exec("CREATE TABLE IF NOT EXISTS users (\n  id BIGSERIAL PRIMARY KEY,\n  first_name TEXT NOT NULL,\n  email TEXT NOT NULL,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  likes int4 DEFAULT 100,\n  counter int8 DEFAULT 1000,\n);\n")
-	conn.DB().Exec("INSERT INTO users (first_name, email, likes, counter) VALUES ('sol', 'sol@sol.com', 100, 1000)")
+	conn.DB().Exec("CREATE TABLE IF NOT EXISTS users (\n  id BIGSERIAL PRIMARY KEY,\n  first_name TEXT NOT NULL,\n  email TEXT NOT NULL,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),\n  likes int4 DEFAULT 100,\n  counter int8 DEFAULT 1000\n);\n")
+	conn.DB().Exec("INSERT INTO users (first_name, email, likes, counter) VALUES ('sol', 'sol@sol.com', 100, 1222)")
 
 	e = New(conn)
 
