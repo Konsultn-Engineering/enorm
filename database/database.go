@@ -6,8 +6,8 @@ import (
 )
 
 type Database interface {
-	Query(query string, args ...interface{}) (Rows, error)
-	QueryContext(ctx context.Context, query string, args ...interface{}) (Rows, error)
+	Query(query string, args ...any) (Rows, error)
+	QueryContext(ctx context.Context, query string, args ...any) (Rows, error)
 	PingContext(ctx context.Context) error
 	Close() error
 	SetMaxOpenConns(n int)
@@ -17,7 +17,8 @@ type Database interface {
 
 type Rows interface {
 	Next() bool
-	Scan(dest ...interface{}) error
+	Scan(dest ...any) error
 	Close() error
 	Columns() ([]string, error)
+	Values() ([]any, error)
 }

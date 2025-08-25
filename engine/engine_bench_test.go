@@ -1,11 +1,12 @@
 package engine
 
 import (
+	"fmt"
 	"github.com/Konsultn-Engineering/enorm/connector"
 	"github.com/Konsultn-Engineering/enorm/schema"
 	"reflect"
 	"runtime"
-	"sync"
+	"strings"
 	"testing"
 	"time"
 )
@@ -65,586 +66,29 @@ func createTestEngine() *Engine {
 	return New(conn)
 }
 
-// Benchmark for Find operations with 100 rows - broken down by step
-func BenchmarkFind_Step1_ReflectValueOf(b *testing.B) {
-	e := createTestEngine()
-	defer e.Close()
-
-	var users []*User
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		// Just the initial reflection
-		destVal := reflect.ValueOf(&users)
-		if destVal.Kind() != reflect.Ptr || destVal.Elem().Kind() != reflect.Slice {
-			b.Fatal("wrong type")
-		}
-		destType := destVal.Type().Elem().Elem()
-		_ = destType
-	}
-}
-
-func BenchmarkFind_Step2_Introspect(b *testing.B) {
-	e := createTestEngine()
-	defer e.Close()
-
-	var users []*User
-	destVal := reflect.ValueOf(&users)
-	destType := destVal.Type().Elem().Elem()
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		_, err := e.schema.Introspect(destType)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkFind_Step3_BuildQuery(b *testing.B) {
-	e := createTestEngine()
-	defer e.Close()
-
-	var users []*User
-	destType := reflect.ValueOf(&users).Type().Elem().Elem()
-	meta, _ := e.schema.Introspect(destType)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		e.Limit(100)
-		_, _, err := e.Builder.Build(meta.TableName, meta.Columns)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkFind_Step4_DatabaseQuery(b *testing.B) {
-	e := createTestEngine()
-	defer e.Close()
-
-	meta, _ := e.schema.Introspect(reflect.TypeOf(&User{}))
-	e.Limit(100)
-	query, args, _ := e.Builder.Build(meta.TableName, meta.Columns)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		rows, err := e.db.Query(query, args...)
-		if err != nil {
-			b.Fatal(err)
-		}
-		rows.Close()
-	}
-}
-
-func BenchmarkFind_Step5_MakeSlices(b *testing.B) {
-	colCount := 7
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		vals := make([]any, colCount)
-		ptrs := make([]any, colCount)
-		for j := range ptrs {
-			ptrs[j] = &vals[j]
-		}
-		_ = vals
-		_ = ptrs
-	}
-}
-
-func BenchmarkFind_Step6_ReflectNew_SingleStruct(b *testing.B) {
-	var users []*User
-	destType := reflect.ValueOf(&users).Type().Elem().Elem()
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		destPtr := reflect.New(destType.Elem())
-		_ = destPtr
-	}
-}
-
-func BenchmarkFind_Step7_ReflectNew_100Structs(b *testing.B) {
-	var users []*User
-	destType := reflect.ValueOf(&users).Type().Elem().Elem()
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		// Simulate creating 100 structs
-		for j := 0; j < 100; j++ {
-			destPtr := reflect.New(destType.Elem())
-			_ = destPtr
-		}
-	}
-}
-
-func BenchmarkFind_Step8_RowsScan_SingleRow(b *testing.B) {
-	e := createTestEngine()
-	defer e.Close()
-
-	meta, _ := e.schema.Introspect(reflect.TypeOf(&User{}))
-	e.Limit(1)
-	query, args, _ := e.Builder.Build(meta.TableName, meta.Columns)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		rows, _ := e.db.Query(query, args...)
-
-		vals := make([]any, 7)
-		ptrs := make([]any, 7)
-		for j := range vals {
-			ptrs[j] = &vals[j]
-		}
-
-		if rows.Next() {
-			rows.Scan(ptrs...)
-		}
-		rows.Close()
-	}
-}
-
-func BenchmarkFind_Step9_ScanAndSet_SingleStruct(b *testing.B) {
-	e := createTestEngine()
-	defer e.Close()
-
-	meta, _ := e.schema.Introspect(reflect.TypeOf(&User{}))
-	cols := meta.Columns
-	vals := []any{int64(1), "John", "john@example.com", time.Now(), time.Now(), int32(100), int64(1000)}
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		user := &User{}
-		err := meta.ScanAndSet(user, cols, vals)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkFind_Step10_ReflectAppend_SingleItem(b *testing.B) {
-	var users []*User
-	user := &User{ID: 1, FirstName: "Test"}
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		// Reset slice
-		users = users[:0]
-
-		sliceVal := reflect.ValueOf(&users).Elem()
-		userVal := reflect.ValueOf(user)
-		sliceVal.Set(reflect.Append(sliceVal, userVal))
-	}
-}
-
-func BenchmarkFind_Step11_ReflectAppend_100Items(b *testing.B) {
-	var users []*User
-	user := &User{ID: 1, FirstName: "Test"}
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		// Reset slice
-		users = users[:0]
-		sliceVal := reflect.ValueOf(&users).Elem()
-
-		// Append 100 items
-		for j := 0; j < 100; j++ {
-			userVal := reflect.ValueOf(user)
-			sliceVal.Set(reflect.Append(sliceVal, userVal))
-		}
-	}
-}
-
-func BenchmarkFind_Step12_CompleteRowProcessing(b *testing.B) {
-	e := createTestEngine()
-	defer e.Close()
-
-	meta, _ := e.schema.Introspect(reflect.TypeOf(&User{}))
-	e.Limit(1)
-	query, args, _ := e.Builder.Build(meta.TableName, meta.Columns)
-
-	var users []*User
-	destType := reflect.ValueOf(&users).Type().Elem().Elem()
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		rows, _ := e.db.Query(query, args...)
-
-		vals := make([]any, 7)
-		ptrs := make([]any, 7)
-		for j := range vals {
-			ptrs[j] = &vals[j]
-		}
-
-		if rows.Next() {
-			// Create struct
-			destPtr := reflect.New(destType.Elem())
-
-			// Scan
-			rows.Scan(ptrs...)
-
-			// Set fields
-			meta.ScanAndSet(destPtr.Interface(), meta.Columns, vals)
-
-			// Append
-			sliceVal := reflect.ValueOf(&users).Elem()
-			sliceVal.Set(reflect.Append(sliceVal, destPtr))
-		}
-		rows.Close()
-
-		// Reset slice
-		users = users[:0]
-	}
-}
-
-func BenchmarkFind_Step13_ReflectValueOfInLoop(b *testing.B) {
-	var users []*User
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		// Simulate calling reflect.ValueOf(dest).Elem() 100 times
-		for j := 0; j < 100; j++ {
-			sliceVal := reflect.ValueOf(&users).Elem()
-			_ = sliceVal
-		}
-	}
-}
-
-func BenchmarkFind_Comparison_DirectAppend(b *testing.B) {
-	var users []*User
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		users = users[:0]
-
-		// Direct append without reflection
-		for j := 0; j < 100; j++ {
-			user := &User{ID: uint64(j), FirstName: "Test"}
-			users = append(users, user)
-		}
-	}
-}
-
-func BenchmarkFind_Comparison_ReflectAppend(b *testing.B) {
-	var users []*User
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		users = users[:0]
-		sliceVal := reflect.ValueOf(&users).Elem()
-
-		// Reflect append
-		for j := 0; j < 100; j++ {
-			user := &User{ID: uint64(j), FirstName: "Test"}
-			sliceVal.Set(reflect.Append(sliceVal, reflect.ValueOf(user)))
-		}
-	}
-}
-
-// Full simulation of Find with 100 rows
-func BenchmarkFind_FullSimulation_100Rows(b *testing.B) {
-	e := createTestEngine()
-	defer e.Close()
-
-	// Prepare 100 rows of mock data
-	mockVals := make([][]any, 100)
-	for i := range mockVals {
-		mockVals[i] = []any{
-			int64(i),
-			"John",
-			"john@example.com",
-			time.Now(),
-			time.Now(),
-			int32(100),
-			int64(1000),
-		}
-	}
-
-	var users []*User
-	destVal := reflect.ValueOf(&users)
-	destType := destVal.Type().Elem().Elem()
-	meta, _ := e.schema.Introspect(destType)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		// Reset slice
-		users = users[:0]
-
-		// Make scan arrays
-		vals := make([]any, 7)
-		ptrs := make([]any, 7)
-		for j := range ptrs {
-			ptrs[j] = &vals[j]
-		}
-
-		// Process 100 rows
-		for rowIdx := 0; rowIdx < 100; rowIdx++ {
-			// Step 1: Create new struct
-			destPtr := reflect.New(destType.Elem())
-
-			// Step 2: Simulate scan (copy mock data)
-			for j := 0; j < 7; j++ {
-				vals[j] = mockVals[rowIdx][j]
-			}
-
-			// Step 3: ScanAndSet
-			meta.ScanAndSet(destPtr.Interface(), meta.Columns, vals)
-
-			// Step 4: Append with reflection
-			sliceVal := reflect.ValueOf(&users).Elem()
-			sliceVal.Set(reflect.Append(sliceVal, destPtr))
-		}
-	}
-}
-
-// Benchmark slice growing pattern
-func BenchmarkFind_SliceGrowing(b *testing.B) {
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		var users []*User
-		sliceVal := reflect.ValueOf(&users).Elem()
-
-		// Simulate growing from 0 to 100
-		for j := 0; j < 100; j++ {
-			user := &User{ID: uint64(j)}
-			sliceVal.Set(reflect.Append(sliceVal, reflect.ValueOf(user)))
-		}
-	}
-}
-
-// Benchmark with pre-allocated slice
-func BenchmarkFind_PreAllocatedSlice(b *testing.B) {
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		users := make([]*User, 0, 100) // Pre-allocate capacity
-		sliceVal := reflect.ValueOf(&users).Elem()
-
-		for j := 0; j < 100; j++ {
-			user := &User{ID: uint64(j)}
-			sliceVal.Set(reflect.Append(sliceVal, reflect.ValueOf(user)))
-		}
-	}
-}
-
-func BenchmarkFind_PreAllocatedStructs(b *testing.B) {
-	e := createTestEngine()
-	defer e.Close()
-
-	meta, _ := e.schema.Introspect(reflect.TypeOf(User{}))
-	query, args, _ := e.Builder.Build(meta.TableName, meta.Columns)
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		// Pre-allocate all structs like pgx
-		users := make([]User, 100)
-
-		rows, _ := e.db.Query(query, args...)
-
-		j := 0
-		for rows.Next() && j < 100 {
-			err := rows.Scan(
-				&users[j].ID,
-				&users[j].FirstName,
-				&users[j].Email,
-				&users[j].CreatedAt,
-				&users[j].UpdatedAt,
-				&users[j].Likes,
-				&users[j].Counter,
-			)
-			if err != nil {
-				b.Fatal(err)
-			}
-			j++
-		}
-		rows.Close()
-	}
-}
-
-func BenchmarkFind_ReformStyle(b *testing.B) {
-	e := createTestEngine()
-	defer e.Close()
-
-	// Prepare statement once
-	query := "SELECT id, first_name, email, created_at, updated_at, likes, counter FROM users LIMIT 100"
-	stmt, _ := e.db.Prepare(query)
-	defer stmt.Close()
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		users := make([]*User, 0, 100)
-
-		rows, _ := stmt.Query()
-
-		for rows.Next() {
-			u := &User{}
-			rows.Scan(&u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt, &u.Likes, &u.Counter)
-			users = append(users, u)
-		}
-		rows.Close()
-	}
-}
-func BenchmarkFind_PgxPrepared(b *testing.B) {
-	e := createTestEngine()
-	defer e.Close()
-
-	// With pgx, you don't need explicit Prepare
-	// Just use named queries or query caching
-	query := "SELECT id, first_name, email, created_at, updated_at, likes, counter FROM users LIMIT 100"
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		users := make([]*User, 0, 100)
-
-		// pgxpool automatically prepares frequently used queries
-		rows, _ := e.db.Query(query)
-
-		for rows.Next() {
-			u := &User{}
-			rows.Scan(&u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt, &u.Likes, &u.Counter)
-			users = append(users, u)
-		}
-		rows.Close()
-	}
-}
-
-var userPool = sync.Pool{
-	New: func() interface{} {
-		return &User{}
-	},
-}
-
-func BenchmarkFind_WithStructPool(b *testing.B) {
-	e := createTestEngine()
-	defer e.Close()
-
-	query := "SELECT id, first_name, email, created_at, updated_at, likes, counter FROM users LIMIT 100"
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		users := make([]*User, 0, 100)
-
-		rows, _ := e.db.Query(query)
-
-		for rows.Next() {
-			u := userPool.Get().(*User)
-			// Reset fields if needed
-			*u = User{} // Clear previous values
-
-			rows.Scan(&u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt, &u.Likes, &u.Counter)
-			users = append(users, u)
-		}
-		rows.Close()
-
-		// Return to pool after use (in real code, caller would do this)
-		for _, u := range users {
-			userPool.Put(u)
-		}
-	}
-}
-
-func BenchmarkFind_StringAllocations(b *testing.B) {
-	var testStrings []string
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		// Simulate scanning 100 rows with 2 strings each
-		for j := 0; j < 100; j++ {
-			firstName := "John"         // This doesn't allocate - string literal
-			email := "john@example.com" // This doesn't allocate either
-			testStrings = append(testStrings, firstName, email)
-		}
-		testStrings = testStrings[:0]
-	}
-}
-
-func BenchmarkFind_StringAllocationsWithConversion(b *testing.B) {
-	var testStrings []string
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		// Simulate what happens during actual scanning
-		for j := 0; j < 100; j++ {
-			// Database returns []byte, converted to string
-			firstNameBytes := []byte("John")
-			emailBytes := []byte("john@example.com")
-
-			firstName := string(firstNameBytes) // Allocates!
-			email := string(emailBytes)         // Allocates!
-			testStrings = append(testStrings, firstName, email)
-		}
-		testStrings = testStrings[:0]
-	}
-}
-
 // ------------------------------------------------------------
 // -----------------------------------------------------------
-func BenchmarkFindOne(b *testing.B) {
-	e := createTestEngine()
-	defer e.Close()
-
-	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldBinder, ctx *schema.Context) error {
-		u := a.(*User)
-		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt, &u.Likes, &u.Counter)
-	})
-
-	u := User{}
-
-	// Warm-up or validate connection
-	_, _ = e.FindOne(&u)
-	runtime.GC()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_, _ = e.FindOne(&u)
-	}
-
-	b.ReportAllocs()
-}
+//func BenchmarkFindOne(b *testing.B) {
+//	e := createTestEngine()
+//	defer e.Close()
+//
+//	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldBinder, ctx *schema.Context) error {
+//		u := a.(*User)
+//		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt, &u.Likes, &u.Counter)
+//	})
+//
+//	u := User{}
+//
+//	// Warm-up or validate connection
+//	_, _ = e.FindOne(&u)
+//	runtime.GC()
+//	b.ResetTimer()
+//	for i := 0; i < b.N; i++ {
+//		_, _ = e.FindOne(&u)
+//	}
+//
+//	b.ReportAllocs()
+//}
 
 func BenchmarkFind(b *testing.B) {
 	e := createTestEngine()
@@ -667,6 +111,406 @@ func BenchmarkFind(b *testing.B) {
 
 	b.ReportAllocs()
 
+}
+
+func BenchmarkDatabaseRTT(b *testing.B) {
+	e := createTestEngine()
+	defer e.Close()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var dummy int
+		rows, err := e.db.Query("SELECT 1")
+
+		rows.Scan(&dummy)
+
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportAllocs()
+}
+
+// Measure database query with actual data fetch (no reflection)
+func BenchmarkDatabaseQueryWithData(b *testing.B) {
+	e := createTestEngine()
+	defer e.Close()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rows, err := e.db.Query("SELECT id, first_name, email, created_at, updated_at, likes, counter FROM users LIMIT 100")
+		if err != nil {
+			b.Fatal(err)
+		}
+
+		// Just iterate and close - no scanning
+		for rows.Next() {
+		}
+		rows.Close()
+	}
+	b.ReportAllocs()
+}
+
+// Section 1: Validation and Introspection
+func BenchmarkFind_Section1_ValidationAndIntrospection(b *testing.B) {
+	e := createTestEngine()
+	defer e.Close()
+
+	// Pre-register to avoid registration overhead
+	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldBinder, ctx *schema.Context) error {
+		u := a.(*User)
+		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt, &u.Likes, &u.Counter)
+	})
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var users []*User
+		dest := &users
+
+		// Section 1 code
+		destVal := reflect.ValueOf(dest)
+		if destVal.Kind() != reflect.Ptr || destVal.Elem().Kind() != reflect.Slice {
+			b.Fatal("validation failed")
+		}
+
+		destType := destVal.Type().Elem().Elem()
+		_, err := e.schema.Introspect(destType)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportAllocs()
+}
+
+// Section 2: Query Building
+func BenchmarkFind_Section2_QueryBuilding(b *testing.B) {
+	e := createTestEngine()
+	defer e.Close()
+
+	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldBinder, ctx *schema.Context) error {
+		u := a.(*User)
+		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt, &u.Likes, &u.Counter)
+	})
+
+	// Pre-introspect to isolate query building
+	var users []*User
+	destType := reflect.TypeOf(&users).Elem().Elem()
+	meta, _ := e.schema.Introspect(destType)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _, err := e.Builder.Build(meta.TableName, meta.Columns)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportAllocs()
+}
+
+// Section 3: Reflection slice creation and pointer building (without DB)
+func BenchmarkFind_Section3_ReflectionSetup(b *testing.B) {
+	e := createTestEngine()
+	defer e.Close()
+
+	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldBinder, ctx *schema.Context) error {
+		u := a.(*User)
+		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt, &u.Likes, &u.Counter)
+	})
+
+	var users []*User
+	destType := reflect.TypeOf(&users).Elem().Elem()
+	meta, _ := e.schema.Introspect(destType)
+	colCount := len(meta.Columns)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Create results slice
+		results := make([]any, 0, 100)
+
+		// Create reflection slice
+		destPtrs := reflect.MakeSlice(reflect.SliceOf(destType.Elem()), 100, 100)
+
+		// Simulate building pointers for 10 rows (typical case)
+		for j := 0; j < 10; j++ {
+			destPtr := destPtrs.Index(j).Addr()
+
+			// Build scan pointers
+			ptrs := make([]any, colCount)
+			for k, col := range meta.Columns {
+				fieldMeta := meta.ColumnMap[col]
+				ptrs[k] = destPtr.Elem().FieldByIndex(fieldMeta.Index).Addr().Interface()
+			}
+
+			results = append(results, destPtr.Interface())
+		}
+	}
+	b.ReportAllocs()
+}
+
+// Section 3: Full scanning with actual database rows
+func BenchmarkFind_Section3_FullScanning(b *testing.B) {
+	e := createTestEngine()
+	defer e.Close()
+
+	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldBinder, ctx *schema.Context) error {
+		u := a.(*User)
+		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt, &u.Likes, &u.Counter)
+	})
+
+	var users []*User
+	destType := reflect.TypeOf(&users).Elem().Elem()
+	meta, _ := e.schema.Introspect(destType)
+	colCount := len(meta.Columns)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rows, _ := e.db.Query("SELECT id, first_name, email, created_at, updated_at, likes, counter FROM users LIMIT 10")
+
+		results := make([]any, 0, 100)
+		destPtrs := reflect.MakeSlice(reflect.SliceOf(destType.Elem()), 100, 100)
+
+		for j := 0; j < destPtrs.Cap() && rows.Next(); j++ {
+			destPtr := destPtrs.Index(j).Addr()
+
+			ptrs := make([]any, colCount)
+			for k, col := range meta.Columns {
+				fieldMeta := meta.ColumnMap[col]
+				ptrs[k] = destPtr.Elem().FieldByIndex(fieldMeta.Index).Addr().Interface()
+			}
+
+			rows.Scan(ptrs...)
+			results = append(results, destPtr.Interface())
+		}
+		rows.Close()
+	}
+	b.ReportAllocs()
+}
+
+// Section 4: Type conversion
+func BenchmarkFind_Section4_TypeConversion(b *testing.B) {
+	e := createTestEngine()
+	defer e.Close()
+
+	// Setup
+	var users []*User
+	destVal := reflect.ValueOf(&users)
+	sliceType := destVal.Elem().Type()
+
+	// Create mock results (simulate 100 rows)
+	results := make([]any, 100)
+	for i := 0; i < 100; i++ { // Fill all 100 elements
+		u := &User{
+			ID:        uint64(i),
+			FirstName: fmt.Sprintf("User%d", i),
+			Email:     fmt.Sprintf("user%d@example.com", i),
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+			Likes:     100 + i,
+			Counter:   uint64(1000 + i),
+		}
+		results[i] = u
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		typedSlice := reflect.MakeSlice(sliceType, len(results), len(results))
+		for j, v := range results {
+			typedSlice.Index(j).Set(reflect.ValueOf(v).Convert(sliceType.Elem()))
+		}
+		destVal.Elem().Set(typedSlice)
+	}
+	b.ReportAllocs()
+}
+
+// Isolated benchmark for just the inner loop pointer building
+func BenchmarkFind_PointerBuildingPerRow(b *testing.B) {
+	e := createTestEngine()
+	defer e.Close()
+
+	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldBinder, ctx *schema.Context) error {
+		u := a.(*User)
+		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt, &u.Likes, &u.Counter)
+	})
+
+	var users []*User
+	destType := reflect.TypeOf(&users).Elem().Elem()
+	meta, _ := e.schema.Introspect(destType)
+	colCount := len(meta.Columns)
+
+	destPtrs := reflect.MakeSlice(reflect.SliceOf(destType.Elem()), 1, 1)
+	destPtr := destPtrs.Index(0).Addr()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ptrs := make([]any, colCount)
+		for j, col := range meta.Columns {
+			fieldMeta := meta.ColumnMap[col]
+			ptrs[j] = destPtr.Elem().FieldByIndex(fieldMeta.Index).Addr().Interface()
+		}
+	}
+	b.ReportAllocs()
+}
+
+// Compare with a non-reflection version to see theoretical best performance
+func BenchmarkFind_DirectScanComparison(b *testing.B) {
+	e := createTestEngine()
+	defer e.Close()
+
+	// Ensure we have data
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		rows, _ := e.db.Query("SELECT id, first_name, email, created_at, updated_at, likes, counter FROM users LIMIT 10")
+
+		users := make([]*User, 0, 10)
+		for rows.Next() {
+			u := &User{}
+			rows.Scan(&u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt, &u.Likes, &u.Counter)
+			users = append(users, u)
+		}
+		rows.Close()
+	}
+	b.ReportAllocs()
+}
+
+// Benchmark to measure the overhead of reflect.ValueOf().Convert()
+func BenchmarkFind_ReflectConvertOverhead(b *testing.B) {
+	// Create sample data
+	users := make([]*User, 10)
+	for i := 0; i < 10; i++ {
+		users[i] = &User{ID: uint64(i)}
+	}
+
+	interfaceSlice := make([]any, 10)
+	for i, u := range users {
+		interfaceSlice[i] = u
+	}
+
+	sliceType := reflect.TypeOf([]*User{})
+	elemType := sliceType.Elem()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, v := range interfaceSlice {
+			reflect.ValueOf(v).Convert(elemType)
+		}
+	}
+	b.ReportAllocs()
+}
+
+// Benchmark the complete Find but with varying row counts
+func BenchmarkFind_1Row(b *testing.B) {
+	benchmarkFindWithRowCount(b, 1)
+}
+
+func BenchmarkFind_10Rows(b *testing.B) {
+	benchmarkFindWithRowCount(b, 10)
+}
+
+func BenchmarkFind_50Rows(b *testing.B) {
+	benchmarkFindWithRowCount(b, 50)
+}
+
+func BenchmarkFind_100Rows(b *testing.B) {
+	benchmarkFindWithRowCount(b, 100)
+}
+
+func benchmarkFindWithRowCount(b *testing.B, rowCount int) {
+	e := createTestEngine()
+	defer e.Close()
+
+	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldBinder, ctx *schema.Context) error {
+		u := a.(*User)
+		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt, &u.Likes, &u.Counter)
+	})
+
+	var users []*User
+	runtime.GC()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = e.Limit(rowCount).Find(&users)
+	}
+	b.ReportAllocs()
+}
+
+// Benchmark to isolate schema.Introspect performance
+func BenchmarkFind_SchemaIntrospectAlone(b *testing.B) {
+	e := createTestEngine()
+	defer e.Close()
+
+	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldBinder, ctx *schema.Context) error {
+		u := a.(*User)
+		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt, &u.Likes, &u.Counter)
+	})
+
+	var users []*User
+	destType := reflect.TypeOf(&users).Elem().Elem()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := e.schema.Introspect(destType)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportAllocs()
+}
+
+// Helper function to run all benchmarks and print a summary
+func TestRunAllBenchmarksWithSummary(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping benchmark summary in short mode")
+	}
+
+	benchmarks := []struct {
+		name string
+		fn   func(*testing.B)
+	}{
+		{"Database RTT", BenchmarkDatabaseRTT},
+		{"Database Query With Data", BenchmarkDatabaseQueryWithData},
+		{"Section 1: Validation & Introspection", BenchmarkFind_Section1_ValidationAndIntrospection},
+		{"Section 2: Query Building", BenchmarkFind_Section2_QueryBuilding},
+		{"Section 3: Reflection Setup", BenchmarkFind_Section3_ReflectionSetup},
+		{"Section 3: Full Scanning", BenchmarkFind_Section3_FullScanning},
+		{"Section 4: Type Conversion", BenchmarkFind_Section4_TypeConversion},
+		{"Pointer Building Per Row", BenchmarkFind_PointerBuildingPerRow},
+		{"Direct Scan (No Reflection)", BenchmarkFind_DirectScanComparison},
+		{"Reflect Convert Overhead", BenchmarkFind_ReflectConvertOverhead},
+		{"Schema Introspect Alone", BenchmarkFind_SchemaIntrospectAlone},
+		{"Full Find", BenchmarkFind},
+	}
+
+	fmt.Println("\n=== Benchmark Summary ===")
+	fmt.Printf("%-40s %15s %15s %15s\n", "Benchmark", "ns/op", "B/op", "allocs/op")
+	fmt.Println(strings.Repeat("-", 90))
+
+	for _, bm := range benchmarks {
+		result := testing.Benchmark(bm.fn)
+		fmt.Printf("%-40s %15d %15d %15d\n",
+			bm.name,
+			result.NsPerOp(),
+			result.AllocedBytesPerOp(),
+			result.AllocsPerOp())
+	}
+}
+
+// Additional helper to create a flame graph compatible output
+func BenchmarkFind_ProfileMode(b *testing.B) {
+	e := createTestEngine()
+	defer e.Close()
+
+	schema.RegisterScanner(User{}, func(a any, scanner schema.FieldBinder, ctx *schema.Context) error {
+		u := a.(*User)
+		return scanner.Bind(u, &u.ID, &u.FirstName, &u.Email, &u.CreatedAt, &u.UpdatedAt, &u.Likes, &u.Counter)
+	})
+
+	var users []*User
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = e.Limit(100).Find(&users)
+	}
 }
 
 //

@@ -17,7 +17,7 @@ func NewPgxDatabase(pool *pgxpool.Pool) *PgxDatabase {
 	return &PgxDatabase{pool: pool}
 }
 
-func (p *PgxDatabase) Query(query string, args ...interface{}) (Rows, error) {
+func (p *PgxDatabase) Query(query string, args ...any) (Rows, error) {
 	rows, err := p.pool.Query(context.Background(), query, args...)
 	if err != nil {
 		return nil, err
@@ -25,7 +25,7 @@ func (p *PgxDatabase) Query(query string, args ...interface{}) (Rows, error) {
 	return &PgxRows{rows: rows}, nil
 }
 
-func (p *PgxDatabase) QueryContext(ctx context.Context, query string, args ...interface{}) (Rows, error) {
+func (p *PgxDatabase) QueryContext(ctx context.Context, query string, args ...any) (Rows, error) {
 	rows, err := p.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -59,9 +59,9 @@ type PgxRows struct {
 	fieldDescriptions []pgconn.FieldDescription
 }
 
-func (p *PgxRows) Next() bool                     { return p.rows.Next() }
-func (p *PgxRows) Scan(dest ...interface{}) error { return p.rows.Scan(dest...) }
-func (p *PgxRows) Close() error                   { p.rows.Close(); return nil }
+func (p *PgxRows) Next() bool             { return p.rows.Next() }
+func (p *PgxRows) Scan(dest ...any) error { return p.rows.Scan(dest...) }
+func (p *PgxRows) Close() error           { p.rows.Close(); return nil }
 func (p *PgxRows) Columns() ([]string, error) {
 	if p.fieldDescriptions == nil {
 		p.fieldDescriptions = p.rows.FieldDescriptions()
@@ -71,4 +71,8 @@ func (p *PgxRows) Columns() ([]string, error) {
 		columns[i] = fd.Name
 	}
 	return columns, nil
+}
+
+func (p *PgxRows) Values() ([]any, error) {
+	return p.rows.Values()
 }

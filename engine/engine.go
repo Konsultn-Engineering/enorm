@@ -127,25 +127,19 @@ func (e *Engine) FindAll(dest any) (string, error) {
 }
 
 func (e *Engine) Find(dest any) (string, error) {
-	/*
-		Process the dest and fetch its meta
-	*/
+	// 1. Validate dest and get element type
 	destVal := reflect.ValueOf(dest)
 	if destVal.Kind() != reflect.Ptr || destVal.Elem().Kind() != reflect.Slice {
 		return "", fmt.Errorf("dest must be pointer to a slice")
 	}
 
-	destType := destVal.Type().Elem().Elem()
-
+	destType := destVal.Type().Elem().Elem() // e.g. *User or User
 	meta, err := e.schema.Introspect(destType)
-
 	if err != nil {
 		return "", err
 	}
 
-	/*
-		Build The query
-	*/
+	// 2. Build the query
 	queryStr, args, err := e.Builder.Build(meta.TableName, meta.Columns)
 	if err != nil {
 		return "", err
@@ -159,36 +153,38 @@ func (e *Engine) Find(dest any) (string, error) {
 
 	colCount := len(meta.Columns)
 
-	vals := make([]any, colCount)
+	// 3. Build up []any with native append (fast!)
+	results := make([]any, 0, 100) // assume LIMIT 100
+
+	destPtrs := reflect.MakeSlice(reflect.SliceOf(destType.Elem()), 100, 100)
 	ptrs := make([]any, colCount)
-	for i := range ptrs {
-		ptrs[i] = &vals[i]
-	}
 
-	for rows.Next() {
-		// 1. Create a new *User (or whatever the struct type is)
-		destPtr := reflect.New(destType.Elem()) // reflect.Value, type *User
+	for i := 0; i < destPtrs.Cap() && rows.Next(); i++ {
+		destPtr := destPtrs.Index(i).Addr() // *User
 
-		// 2. Scan into fields of destPtr
-		// (Assume ptrs are set up to point to fields of destPtr.Interface())
+		// Build ptrs to struct fields directly
+		for j, col := range meta.Columns {
+			fieldMeta := meta.ColumnMap[col]
+			ptrs[j] = destPtr.Elem().FieldByIndex(fieldMeta.Index).Addr().Interface()
+		}
+
 		err = rows.Scan(ptrs...)
 		if err != nil {
 			return queryStr, err
 		}
 
-		// 3. Set fields from scanned vals, if needed
-		// (Usually not needed if you scan directly into struct fields)
-		err = meta.ScanAndSet(destPtr.Interface(), meta.Columns, vals)
-		if err != nil {
-			return queryStr, err
-		}
-
-		// 4. Append destPtr.Interface() to your slice
-		sliceVal := reflect.ValueOf(dest).Elem()
-		sliceVal.Set(reflect.Append(sliceVal, destPtr))
+		results = append(results, destPtr.Interface())
 	}
 
-	return "", nil
+	// 4. Convert []any to correct slice type ([]T) and set dest
+	sliceType := destVal.Elem().Type() // e.g. []*User
+	typedSlice := reflect.MakeSlice(sliceType, len(results), len(results))
+	for i, v := range results {
+		typedSlice.Index(i).Set(reflect.ValueOf(v).Convert(sliceType.Elem()))
+	}
+	destVal.Elem().Set(typedSlice)
+
+	return queryStr, nil
 }
 
 func (e *Engine) Exists() (bool, error) {
