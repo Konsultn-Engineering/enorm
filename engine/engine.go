@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"github.com/Konsultn-Engineering/enorm/ast"
 	"github.com/Konsultn-Engineering/enorm/cache"
 	"github.com/Konsultn-Engineering/enorm/connector"
@@ -80,7 +81,6 @@ func (e *Engine) FindOne(dest any) (string, error) {
 		return query, sql.ErrNoRows
 	}
 
-	// REPLACE YOUR CURRENT SLICE ALLOCATION WITH THIS:
 	scanRes := e.scanPool.Get().(*struct {
 		vals []any
 		ptrs []any
@@ -123,6 +123,71 @@ func (e *Engine) FindMany(dest any, ids []any) (string, error) {
 }
 
 func (e *Engine) FindAll(dest any) (string, error) {
+	return "", nil
+}
+
+func (e *Engine) Find(dest any) (string, error) {
+	/*
+		Process the dest and fetch its meta
+	*/
+	destVal := reflect.ValueOf(dest)
+	if destVal.Kind() != reflect.Ptr || destVal.Elem().Kind() != reflect.Slice {
+		return "", fmt.Errorf("dest must be pointer to a slice")
+	}
+
+	destType := destVal.Type().Elem().Elem()
+
+	meta, err := e.schema.Introspect(destType)
+
+	if err != nil {
+		return "", err
+	}
+
+	/*
+		Build The query
+	*/
+	queryStr, args, err := e.Builder.Build(meta.TableName, meta.Columns)
+	if err != nil {
+		return "", err
+	}
+
+	rows, err := e.db.Query(queryStr, args...)
+	if err != nil {
+		return queryStr, err
+	}
+	defer rows.Close()
+
+	colCount := len(meta.Columns)
+
+	vals := make([]any, colCount)
+	ptrs := make([]any, colCount)
+	for i := range ptrs {
+		ptrs[i] = &vals[i]
+	}
+
+	for rows.Next() {
+		// 1. Create a new *User (or whatever the struct type is)
+		destPtr := reflect.New(destType.Elem()) // reflect.Value, type *User
+
+		// 2. Scan into fields of destPtr
+		// (Assume ptrs are set up to point to fields of destPtr.Interface())
+		err = rows.Scan(ptrs...)
+		if err != nil {
+			return queryStr, err
+		}
+
+		// 3. Set fields from scanned vals, if needed
+		// (Usually not needed if you scan directly into struct fields)
+		err = meta.ScanAndSet(destPtr.Interface(), meta.Columns, vals)
+		if err != nil {
+			return queryStr, err
+		}
+
+		// 4. Append destPtr.Interface() to your slice
+		sliceVal := reflect.ValueOf(dest).Elem()
+		sliceVal.Set(reflect.Append(sliceVal, destPtr))
+	}
+
 	return "", nil
 }
 
@@ -417,6 +482,7 @@ func (e *Engine) Close() error {
 // =============================================================================
 // HELPER METHODS
 // =============================================================================
+
 // SetConnectionPool allows optimizing the connection pool
 func (e *Engine) SetConnectionPool(maxOpen, maxIdle int) {
 	e.db.SetMaxOpenConns(maxOpen)

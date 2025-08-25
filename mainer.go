@@ -1,11 +1,9 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"github.com/Konsultn-Engineering/enorm/connector"
 	"github.com/Konsultn-Engineering/enorm/engine"
-	_ "github.com/Konsultn-Engineering/enorm/providers/postgres"
 	"time"
 )
 
@@ -34,7 +32,7 @@ type Post struct {
 }
 
 func main() {
-	enorm, err := connector.New("postgres", connector.Config{
+	conn, err := connector.New("postgres", connector.Config{
 		Host:           "localhost",
 		Port:           5432,
 		Database:       "enorm_test",
@@ -49,21 +47,12 @@ func main() {
 		panic(err)
 	}
 
-	en, err := enorm.Connect(context.Background())
-	if err != nil {
-		panic(err)
+	enorm := engine.New(conn)
+
+	var users []*User
+	_, err = enorm.Find(&users)
+
+	for _, user := range users {
+		fmt.Println(user)
 	}
-
-	eng := engine.New(en.DB())
-
-	user := &User{}
-
-	query, err := eng.FindOne(user)
-
-	fmt.Println(query)
-	if err != nil {
-		panic(err)
-	}
-
-	fmt.Println(user)
 }

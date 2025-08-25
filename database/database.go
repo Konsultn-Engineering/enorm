@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 )
 
 type Database interface {
@@ -11,6 +12,7 @@ type Database interface {
 	Close() error
 	SetMaxOpenConns(n int)
 	SetMaxIdleConns(n int)
+	Prepare(query string) (*sql.Stmt, error)
 }
 
 type Rows interface {

@@ -45,6 +45,10 @@ func (s *SqlDatabase) SetMaxIdleConns(n int) {
 	s.db.SetMaxIdleConns(n)
 }
 
+func (s *SqlDatabase) Prepare(query string) (*sql.Stmt, error) {
+	return s.db.Prepare(query)
+}
+
 type SqlRows struct {
 	rows *sql.Rows
 }

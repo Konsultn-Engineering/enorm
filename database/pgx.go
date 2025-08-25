@@ -2,6 +2,8 @@ package database
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -46,6 +48,10 @@ func (p *PgxDatabase) SetMaxOpenConns(n int) {
 
 func (p *PgxDatabase) SetMaxIdleConns(n int) {
 	// pgxpool handles this internally
+}
+
+func (p *PgxDatabase) Prepare(query string) (*sql.Stmt, error) {
+	return nil, fmt.Errorf("Prepare not supported with pgxpool - queries are automatically prepared")
 }
 
 type PgxRows struct {
