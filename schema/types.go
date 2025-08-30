@@ -1,8 +1,10 @@
 package schema
 
 import (
+	"database/sql"
 	"reflect"
 	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -43,6 +45,10 @@ type EntityMeta struct {
 
 	// Custom scanning
 	ScannerFn ScannerFunc // Optional custom scanner function for complex types
+
+	pointerFactory     func(unsafe.Pointer) []interface{} // The magic function
+	pointerFactoryOnce sync.Once                          // Build it exactly once
+	maxColumns         int                                // For slice pre-sizing
 }
 
 // GetScanVals returns a properly sized slice for database scanning operations.
@@ -132,7 +138,206 @@ type FieldMeta struct {
 
 	// High-performance field setter using unsafe pointers and pre-compiled type conversions
 	// Bypasses reflection for maximum speed during database row scanning
-	DirectSet SetterFunc
+	DirectSet    SetterFunc
+	PointerMaker func(unsafe.Pointer) interface{} // The optimized pointer creator
+}
+
+func (fm *FieldMeta) buildPointerMaker() {
+	offset := fm.Offset
+	fieldType := fm.Type
+
+	switch fieldType.Kind() {
+	// === INTEGER TYPES ===
+	case reflect.Bool:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*bool)(unsafe.Add(structPtr, offset))
+		}
+	case reflect.Int:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*int)(unsafe.Add(structPtr, offset))
+		}
+	case reflect.Int8:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*int8)(unsafe.Add(structPtr, offset))
+		}
+	case reflect.Int16:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*int16)(unsafe.Add(structPtr, offset))
+		}
+	case reflect.Int32:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*int32)(unsafe.Add(structPtr, offset))
+		}
+	case reflect.Int64:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*int64)(unsafe.Add(structPtr, offset))
+		}
+	case reflect.Uint:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*uint)(unsafe.Add(structPtr, offset))
+		}
+	case reflect.Uint8:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*uint8)(unsafe.Add(structPtr, offset))
+		}
+	case reflect.Uint16:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*uint16)(unsafe.Add(structPtr, offset))
+		}
+	case reflect.Uint32:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*uint32)(unsafe.Add(structPtr, offset))
+		}
+	case reflect.Uint64:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*uint64)(unsafe.Add(structPtr, offset))
+		}
+	case reflect.Uintptr:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*uintptr)(unsafe.Add(structPtr, offset))
+		}
+
+	// === FLOATING POINT ===
+	case reflect.Float32:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*float32)(unsafe.Add(structPtr, offset))
+		}
+	case reflect.Float64:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*float64)(unsafe.Add(structPtr, offset))
+		}
+	case reflect.Complex64:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*complex64)(unsafe.Add(structPtr, offset))
+		}
+	case reflect.Complex128:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*complex128)(unsafe.Add(structPtr, offset))
+		}
+
+	// === STRING ===
+	case reflect.String:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*string)(unsafe.Add(structPtr, offset))
+		}
+
+	// === SLICE (mainly []byte for database) ===
+	case reflect.Slice:
+		if fieldType.Elem().Kind() == reflect.Uint8 { // []byte
+			fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+				return (*[]byte)(unsafe.Add(structPtr, offset))
+			}
+		} else {
+			// Generic slice - use reflection fallback
+			fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+				fieldPtr := unsafe.Add(structPtr, offset)
+				return reflect.NewAt(fieldType, fieldPtr).Interface()
+			}
+		}
+
+	// === POINTER TYPES (for nullable fields) ===
+	case reflect.Pointer:
+		elemType := fieldType.Elem()
+		switch elemType.Kind() {
+		case reflect.Bool:
+			fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+				return (**bool)(unsafe.Add(structPtr, offset))
+			}
+		case reflect.Int:
+			fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+				return (**int)(unsafe.Add(structPtr, offset))
+			}
+		case reflect.Int64:
+			fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+				return (**int64)(unsafe.Add(structPtr, offset))
+			}
+		case reflect.String:
+			fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+				return (**string)(unsafe.Add(structPtr, offset))
+			}
+		case reflect.Float64:
+			fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+				return (**float64)(unsafe.Add(structPtr, offset))
+			}
+		// Add other pointer types as needed
+		default:
+			// Generic pointer - use reflection
+			fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+				fieldPtr := unsafe.Add(structPtr, offset)
+				return reflect.NewAt(fieldType, fieldPtr).Interface()
+			}
+		}
+
+	// === STRUCT TYPES (for embedded structs, time.Time, sql.Null*) ===
+	case reflect.Struct:
+		fm.PointerMaker = fm.buildStructPointerMaker(fieldType, offset)
+
+	// === INTERFACE (any, interface{}) ===
+	case reflect.Interface:
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			return (*interface{})(unsafe.Add(structPtr, offset))
+		}
+
+	// === FALLBACK for exotic types ===
+	default:
+		// Arrays, Maps, Channels, Functions - use reflection
+		fm.PointerMaker = func(structPtr unsafe.Pointer) interface{} {
+			fieldPtr := unsafe.Add(structPtr, offset)
+			return reflect.NewAt(fieldType, fieldPtr).Interface()
+		}
+	}
+}
+
+// buildStructPointerMaker handles common struct types for databases
+func (fm *FieldMeta) buildStructPointerMaker(fieldType reflect.Type, offset uintptr) func(unsafe.Pointer) interface{} {
+	typeName := fieldType.String()
+
+	switch typeName {
+	// === TIME TYPES ===
+	case "time.Time":
+		return func(structPtr unsafe.Pointer) interface{} {
+			return (*time.Time)(unsafe.Add(structPtr, offset))
+		}
+
+	// === SQL NULL TYPES ===
+	case "sql.NullString":
+		return func(structPtr unsafe.Pointer) interface{} {
+			return (*sql.NullString)(unsafe.Add(structPtr, offset))
+		}
+	case "sql.NullInt64":
+		return func(structPtr unsafe.Pointer) interface{} {
+			return (*sql.NullInt64)(unsafe.Add(structPtr, offset))
+		}
+	case "sql.NullInt32":
+		return func(structPtr unsafe.Pointer) interface{} {
+			return (*sql.NullInt32)(unsafe.Add(structPtr, offset))
+		}
+	case "sql.NullFloat64":
+		return func(structPtr unsafe.Pointer) interface{} {
+			return (*sql.NullFloat64)(unsafe.Add(structPtr, offset))
+		}
+	case "sql.NullBool":
+		return func(structPtr unsafe.Pointer) interface{} {
+			return (*sql.NullBool)(unsafe.Add(structPtr, offset))
+		}
+	case "sql.NullTime":
+		return func(structPtr unsafe.Pointer) interface{} {
+			return (*sql.NullTime)(unsafe.Add(structPtr, offset))
+		}
+
+	// === CUSTOM TYPES (add your common ones) ===
+	// case "uuid.UUID":
+	//     return func(structPtr unsafe.Pointer) interface{} {
+	//         return (*uuid.UUID)(unsafe.Add(structPtr, offset))
+	//     }
+
+	// === GENERIC STRUCT FALLBACK ===
+	default:
+		return func(structPtr unsafe.Pointer) interface{} {
+			fieldPtr := unsafe.Add(structPtr, offset)
+			return reflect.NewAt(fieldType, fieldPtr).Interface()
+		}
+	}
 }
 
 // TableNamer allows structs to specify custom database table names.

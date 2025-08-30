@@ -13,7 +13,15 @@ import (
 	"github.com/Konsultn-Engineering/enorm/visitor"
 	"reflect"
 	"sync"
+	"unsafe"
 )
+
+var scanPtrPool = sync.Pool{
+	New: func() interface{} {
+		// Allocate a reasonably sized slice
+		return make([]any, 0, 20)
+	},
+}
 
 type Engine struct {
 	*query.Builder
@@ -127,19 +135,17 @@ func (e *Engine) FindAll(dest any) (string, error) {
 }
 
 func (e *Engine) Find(dest any) (string, error) {
-	// 1. Validate dest and get element type
 	destVal := reflect.ValueOf(dest)
 	if destVal.Kind() != reflect.Ptr || destVal.Elem().Kind() != reflect.Slice {
 		return "", fmt.Errorf("dest must be pointer to a slice")
 	}
 
-	destType := destVal.Type().Elem().Elem() // e.g. *User or User
+	destType := destVal.Type().Elem().Elem()
 	meta, err := e.schema.Introspect(destType)
 	if err != nil {
 		return "", err
 	}
 
-	// 2. Build the query
 	queryStr, args, err := e.Builder.Build(meta.TableName, meta.Columns)
 	if err != nil {
 		return "", err
@@ -152,20 +158,33 @@ func (e *Engine) Find(dest any) (string, error) {
 	defer rows.Close()
 
 	colCount := len(meta.Columns)
-
-	// 3. Build up []any with native append (fast!)
-	results := make([]any, 0, 100) // assume LIMIT 100
-
+	results := make([]any, 0, 100)
 	destPtrs := reflect.MakeSlice(reflect.SliceOf(destType.Elem()), 100, 100)
-	ptrs := make([]any, colCount)
+
+	ptrs := scanPtrPool.Get().([]any)
+	ptrs = ptrs[:colCount]
+	defer func() {
+		for i := range ptrs {
+			ptrs[i] = nil
+		}
+		scanPtrPool.Put(ptrs[:0])
+	}()
 
 	for i := 0; i < destPtrs.Cap() && rows.Next(); i++ {
-		destPtr := destPtrs.Index(i).Addr() // *User
+		destPtr := destPtrs.Index(i).Addr()
+		structElem := destPtr.Elem()
 
-		// Build ptrs to struct fields directly
+		// NUCLEAR: Use unsafe pointer arithmetic instead of FieldByIndex
+		structPtr := unsafe.Pointer(structElem.UnsafeAddr())
+
 		for j, col := range meta.Columns {
 			fieldMeta := meta.ColumnMap[col]
-			ptrs[j] = destPtr.Elem().FieldByIndex(fieldMeta.Index).Addr().Interface()
+			if fieldMeta != nil {
+				ptrs[j] = fieldMeta.PointerMaker(structPtr) // FAST!
+			} else {
+				var dummy interface{}
+				ptrs[j] = &dummy // Handle unmapped columns
+			}
 		}
 
 		err = rows.Scan(ptrs...)
@@ -176,11 +195,10 @@ func (e *Engine) Find(dest any) (string, error) {
 		results = append(results, destPtr.Interface())
 	}
 
-	// 4. Convert []any to correct slice type ([]T) and set dest
-	sliceType := destVal.Elem().Type() // e.g. []*User
+	sliceType := destVal.Elem().Type()
 	typedSlice := reflect.MakeSlice(sliceType, len(results), len(results))
 	for i, v := range results {
-		typedSlice.Index(i).Set(reflect.ValueOf(v).Convert(sliceType.Elem()))
+		typedSlice.Index(i).Set(reflect.ValueOf(v))
 	}
 	destVal.Elem().Set(typedSlice)
 

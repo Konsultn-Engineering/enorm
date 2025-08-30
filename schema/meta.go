@@ -104,7 +104,7 @@ func (ctx *Context) buildMeta(t reflect.Type) (*EntityMeta, error) {
 
 		// Create optimized setter (ONLY ONE TYPE - no confusion)
 		fm.DirectSet = createDirectSetterForType(f.Type, f.Offset)
-
+		fm.buildPointerMaker()
 		// Build lookup maps
 		meta.Fields = append(meta.Fields, fm)
 		meta.FieldMap[f.Name] = fm
