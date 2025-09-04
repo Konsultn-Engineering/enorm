@@ -170,7 +170,39 @@ func (v *SQLVisitor) VisitSelect(s *ast.SelectStmt) error {
 }
 
 func (v *SQLVisitor) VisitInsert(stmt *ast.InsertStmt) error {
-	//TODO implement me
+	v.sb.WriteString("INSERT INTO ")
+	if err := stmt.Table.Accept(v); err != nil {
+		return err
+	}
+
+	if len(stmt.Columns) > 0 {
+		v.sb.WriteString("(")
+		for i, col := range stmt.Columns {
+			if i > 0 {
+				v.sb.WriteString(", ")
+			}
+			v.sb.WriteString(v.dialect.QuoteIdentifier(col))
+		}
+		v.sb.WriteString(") ")
+	}
+
+	v.sb.WriteString("VALUES ")
+
+	for i, row := range stmt.Values {
+		if i > 0 {
+			v.sb.WriteString(", ")
+		}
+		v.sb.WriteByte('(')
+		for j, val := range row {
+			if j > 0 {
+				v.sb.WriteString(", ")
+			}
+			if err := val.Accept(v); err != nil {
+				return err
+			}
+		}
+		v.sb.WriteByte(')')
+	}
 	return nil
 }
 
@@ -466,4 +498,4 @@ func (v *SQLVisitor) VisitLimitClause(clause *ast.LimitClause) error {
 }
 
 // stub for interface satisfaction
-//type _ ast.Visitor = (*SQLVisitor)(nil)
+var _ ast.Visitor = (*SQLVisitor)(nil)

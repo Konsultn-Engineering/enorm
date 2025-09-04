@@ -212,6 +212,11 @@ func (e *Engine) Find(dest any) (string, error) {
 	return queryStr, nil
 }
 
+func (e *Engine) Save(dest any) (string, error) {
+
+	return "", nil
+}
+
 func (e *Engine) Exists() (bool, error) {
 	return false, nil
 }
