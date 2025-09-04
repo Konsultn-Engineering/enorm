@@ -10,9 +10,7 @@ import (
 	"unsafe"
 )
 
-// type_system.go - Unified type system for Go <-> Database type mapping and high-performance setters
 //
-// This package provides:
 // - Bidirectional type conversion between Go types and database types
 // - High-performance unsafe pointer setters for database scanning
 // - Multi-database dialect support (PostgreSQL, MySQL, SQLServer, Oracle, SQLite, ClickHouse)
@@ -308,6 +306,7 @@ type RegisteredTypeInfo struct {
 var (
 	typeResolvers   = sync.Map{} // map[reflect.Type]TypeResolver
 	registeredTypes = sync.Map{} // map[reflect.Type]*RegisteredTypeInfo
+	ptrCreators     = sync.Map{} // map[reflect.Type]func(uintptr) func(unsafe.Pointer) interface{}
 )
 
 // RegisterSetterCreator registers a type with high-performance setter and database mapping
@@ -466,6 +465,18 @@ func (r TypeAliasResolver[T, U]) GetDatabaseType(goType reflect.Type, dialect Da
 // =========================================================================
 // Registration Functions
 // =========================================================================
+
+// RegisterBasicPtrType registers a pointer type for optimized unsafe access
+func RegisterBasicPtrType[T any]() {
+	var zero T
+	userType := reflect.TypeOf(zero)
+
+	ptrCreators.Store(userType, func(offset uintptr) func(unsafe.Pointer) interface{} {
+		return func(structPtr unsafe.Pointer) interface{} {
+			return (*T)(unsafe.Pointer(uintptr(structPtr) + offset))
+		}
+	})
+}
 
 // RegisterBasicType registers a basic Go type
 func RegisterBasicType[T any]() {

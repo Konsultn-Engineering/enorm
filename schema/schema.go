@@ -11,6 +11,22 @@ import (
 var setterCreators = sync.Map{}
 
 func init() {
+	// Register essential types for DirectPtr
+	RegisterBasicPtrType[string]()
+	RegisterBasicPtrType[int]()
+	RegisterBasicPtrType[int64]()
+	RegisterBasicPtrType[float64]()
+	RegisterBasicPtrType[bool]()
+	RegisterBasicPtrType[int32]()
+	RegisterBasicPtrType[int16]()
+	RegisterBasicPtrType[int8]()
+	RegisterBasicPtrType[float32]()
+	RegisterBasicPtrType[uint]()
+	RegisterBasicPtrType[uint64]()
+	RegisterBasicPtrType[uint32]()
+	RegisterBasicPtrType[uint16]()
+	RegisterBasicPtrType[uint8]()
+
 	// Register essential types
 	RegisterBasicType[string]()
 	RegisterBasicType[bool]()

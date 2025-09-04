@@ -3,6 +3,7 @@ package schema
 import (
 	"fmt"
 	"reflect"
+	"unsafe"
 )
 
 // buildMeta constructs comprehensive metadata for a struct type, including
@@ -104,7 +105,8 @@ func (ctx *Context) buildMeta(t reflect.Type) (*EntityMeta, error) {
 
 		// Create optimized setter (ONLY ONE TYPE - no confusion)
 		fm.DirectSet = createDirectSetterForType(f.Type, f.Offset)
-		fm.buildPointerMaker()
+		fm.DirectPtr = createDirectPtrFunc(f.Type, f.Offset)
+
 		// Build lookup maps
 		meta.Fields = append(meta.Fields, fm)
 		meta.FieldMap[f.Name] = fm
@@ -119,4 +121,14 @@ func (ctx *Context) buildMeta(t reflect.Type) (*EntityMeta, error) {
 	}
 
 	return meta, nil
+}
+
+func createDirectPtrFunc(fieldType reflect.Type, offset uintptr) func(unsafe.Pointer) interface{} {
+	if creator, ok := ptrCreators.Load(fieldType); ok {
+		return creator.(func(uintptr) func(unsafe.Pointer) interface{})(offset)
+	}
+
+	// No fallback - panic if type not registered
+	panic(fmt.Sprintf("DirectPtr not registered for type %s - add RegisterBasicPtrType[%s]() to init()",
+		fieldType, fieldType))
 }

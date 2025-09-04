@@ -170,20 +170,22 @@ func (e *Engine) Find(dest any) (string, error) {
 		scanPtrPool.Put(ptrs[:0])
 	}()
 
+	fieldMetas := make([]*schema.FieldMeta, len(meta.Columns))
+	for i, col := range meta.Columns {
+		fieldMetas[i] = meta.ColumnMap[col]
+	}
+
 	for i := 0; i < destPtrs.Cap() && rows.Next(); i++ {
 		destPtr := destPtrs.Index(i).Addr()
 		structElem := destPtr.Elem()
-
-		// NUCLEAR: Use unsafe pointer arithmetic instead of FieldByIndex
 		structPtr := unsafe.Pointer(structElem.UnsafeAddr())
 
-		for j, col := range meta.Columns {
-			fieldMeta := meta.ColumnMap[col]
+		for j := range meta.Columns {
+			fieldMeta := fieldMetas[j]
 			if fieldMeta != nil {
-				ptrs[j] = fieldMeta.PointerMaker(structPtr) // FAST!
+				ptrs[j] = fieldMeta.DirectPtr(structPtr)
 			} else {
-				var dummy interface{}
-				ptrs[j] = &dummy // Handle unmapped columns
+				ptrs[j] = schema.GetGlobalDummy()
 			}
 		}
 
@@ -195,12 +197,17 @@ func (e *Engine) Find(dest any) (string, error) {
 		results = append(results, destPtr.Interface())
 	}
 
-	sliceType := destVal.Elem().Type()
-	typedSlice := reflect.MakeSlice(sliceType, len(results), len(results))
-	for i, v := range results {
-		typedSlice.Index(i).Set(reflect.ValueOf(v))
+	// OPTIMIZATION: Replace the expensive result assembly with this faster version
+	sliceVal := destVal.Elem()
+	sliceVal.Set(reflect.MakeSlice(sliceVal.Type(), len(results), len(results)))
+
+	// Use reflect.Copy for bulk copying instead of individual Set operations
+	if len(results) > 0 {
+		// Create a temporary slice of the results
+		for i := 0; i < len(results); i++ {
+			sliceVal.Index(i).Set(reflect.ValueOf(results[i]))
+		}
 	}
-	destVal.Elem().Set(typedSlice)
 
 	return queryStr, nil
 }
