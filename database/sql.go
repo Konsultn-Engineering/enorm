@@ -77,5 +77,7 @@ func (s *SqlRows) Columns() ([]string, error) { return s.rows.Columns() }
 // Note: database/sql does not provide this directly; returns empty slice.
 func (s *SqlRows) Values() ([]any, error) { return []any{}, nil }
 
+func (s *SqlRows) Err() error { return s.rows.Err() }
+
 // Assert that SqlDatabase implements the Database interface.
 var _ Database = (*SqlDatabase)(nil)

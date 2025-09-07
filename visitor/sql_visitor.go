@@ -176,7 +176,7 @@ func (v *SQLVisitor) VisitInsert(stmt *ast.InsertStmt) error {
 	}
 
 	if len(stmt.Columns) > 0 {
-		v.sb.WriteString("(")
+		v.sb.WriteString(" (")
 		for i, col := range stmt.Columns {
 			if i > 0 {
 				v.sb.WriteString(", ")
@@ -203,6 +203,7 @@ func (v *SQLVisitor) VisitInsert(stmt *ast.InsertStmt) error {
 		}
 		v.sb.WriteByte(')')
 	}
+	v.sb.WriteString(v.dialect.ReturningID(stmt.Returning))
 	return nil
 }
 

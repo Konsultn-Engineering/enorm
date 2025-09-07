@@ -5,4 +5,5 @@ type Dialect interface {
 	Placeholder(n int) string
 	RenderValue(v any) string
 	SupportsVector() bool
+	ReturningID(fields []string) string
 }

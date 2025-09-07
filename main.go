@@ -8,7 +8,7 @@ import (
 )
 
 type Model struct {
-	ID      int
+	ID      int `db:"primary;auto"`
 	Name    string
 	Title   string
 	Fax     string
@@ -41,9 +41,14 @@ func createTestEngine() (*engine.Engine, database.Database) {
 
 func main() {
 	e, _ := createTestEngine()
-	var m []*Model
-	e.Find(&m)
-	for _, v := range m {
-		fmt.Println(v)
+
+	newModel := Model{Name: "Test", Title: "Title", Fax: "123", Web: "example.com", Right: true, Age: 30, Counter: 100}
+
+	_, err := e.Save(&newModel)
+
+	if err != nil {
+		panic("Failed to save: " + err.Error())
 	}
+
+	fmt.Println(newModel)
 }

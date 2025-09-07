@@ -51,3 +51,6 @@ func (m MySQL) RenderValue(v any) string {
 func (m MySQL) SupportsVector() bool {
 	return false
 }
+func (m MySQL) ReturningID(fields []string) string {
+	return ""
+}

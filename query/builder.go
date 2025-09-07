@@ -316,3 +316,23 @@ func (b *Builder) addChild(child *Builder) {
 	child.nextSibling = b.firstChild
 	b.firstChild = child
 }
+
+func (b *Builder) Insert(table string, columns []string, values [][]any, returning []string) (string, []interface{}, error) {
+	valNodes := make([][]ast.Node, len(values))
+	for i, row := range values {
+		valNodes[i] = make([]ast.Node, len(row))
+		for j, val := range row {
+			valNodes[i][j] = ast.NewValue(val)
+		}
+	}
+
+	insertStmt := ast.NewInsertStmt(
+		ast.NewTable(b.schema, table, ""),
+		columns,
+		valNodes,
+		returning,
+	)
+
+	sql, args, err := b.visitor.Build(insertStmt)
+	return sql, args, err
+}

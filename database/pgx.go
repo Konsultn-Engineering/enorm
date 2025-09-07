@@ -97,6 +97,10 @@ func (p *PgxRows) Values() ([]any, error) {
 	return p.rows.Values()
 }
 
+func (p *PgxRows) Err() error {
+	return p.rows.Err()
+}
+
 // PgxResult implements Result for pgxpool command tags.
 type PgxResult struct {
 	cmdTag pgconn.CommandTag

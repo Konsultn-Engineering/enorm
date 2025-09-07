@@ -212,9 +212,129 @@ func (e *Engine) Find(dest any) (string, error) {
 	return queryStr, nil
 }
 
-func (e *Engine) Save(dest any) (string, error) {
+var (
+	stringSlicePool = sync.Pool{
+		New: func() interface{} {
+			return make([]string, 0, 10)
+		},
+	}
+	interfaceSlicePool = sync.Pool{
+		New: func() interface{} {
+			return make([]interface{}, 0, 10)
+		},
+	}
+)
 
-	return "", nil
+func (e *Engine) Save(dest any) (string, error) {
+	v := reflect.ValueOf(dest)
+	if v.Kind() == reflect.Ptr {
+		v = v.Elem()
+	}
+
+	if v.Kind() != reflect.Struct {
+		return "", fmt.Errorf("dest must be a struct or pointer to struct")
+	}
+	t := v.Type()
+
+	numFields := v.NumField()
+	columns := stringSlicePool.Get().([]string)
+	defer func() {
+		columns = columns[:0]
+		stringSlicePool.Put(columns)
+	}()
+
+	values := interfaceSlicePool.Get().([]interface{})
+	defer func() {
+		values = values[:0]
+		interfaceSlicePool.Put(values)
+	}()
+	returningFields := make([]reflect.Value, 0, numFields/4) // estimate
+	returningCols := make([]string, 0, numFields/4)
+
+	meta, err := e.schema.Introspect(t)
+	if err != nil {
+		return "", err
+	}
+
+	for i := 0; i < v.NumField(); i++ {
+		field := t.Field(i)
+		fieldValue := v.Field(i)
+
+		// Skip early to avoid unnecessary work
+		if !fieldValue.CanInterface() {
+			continue
+		}
+
+		fieldMeta := meta.FieldMap[field.Name]
+		if fieldMeta == nil {
+			continue // Skip unmapped fields early
+		}
+
+		// Check zero value once and branch
+		isZero := fieldValue.IsZero()
+		if isZero && fieldMeta.Tag.AutoGenerate {
+			returningFields = append(returningFields, fieldValue)
+			returningCols = append(returningCols, fieldMeta.DBName)
+			continue
+		}
+
+		if isZero {
+			continue
+		}
+
+		columns = append(columns, fieldMeta.DBName)
+		values = append(values, fieldValue.Interface())
+	}
+
+	queryStr, args, err := e.Builder.Insert(meta.TableName, columns, [][]any{values}, returningCols)
+
+	if err != nil {
+		return "", err
+	}
+
+	rows, _ := e.db.Query(queryStr, args...)
+	if err != nil {
+		return "", fmt.Errorf("failed to execute insert: %w", err)
+	}
+	defer rows.Close()
+	//
+	//// Check if there are any rows at all
+	if !rows.Next() {
+		// Check for any errors that occurred during execution
+		if err := rows.Err(); err != nil {
+			return "", fmt.Errorf("database error: %w", err)
+		}
+		return "", fmt.Errorf("no rows returned from insert - query may have failed silently")
+	}
+
+	if numReturning := len(returningCols); numReturning > 0 {
+		scanArgs := make([]interface{}, numReturning)
+		scanValues := make([]interface{}, numReturning)
+
+		for i := range scanValues {
+			scanArgs[i] = &scanValues[i]
+		}
+
+		if err := rows.Scan(scanArgs...); err != nil {
+			return "", fmt.Errorf("failed to scan: %w", err)
+		}
+
+		// Optimize field assignment
+		for i, field := range returningFields {
+			if !field.CanSet() || scanValues[i] == nil {
+				continue
+			}
+
+			sourceValue := reflect.ValueOf(scanValues[i])
+			if sourceValue.Type().AssignableTo(field.Type()) {
+				field.Set(sourceValue)
+			} else if sourceValue.Type().ConvertibleTo(field.Type()) {
+				field.Set(sourceValue.Convert(field.Type()))
+			}
+		}
+	}
+
+	return fmt.Sprintf("%s", args), nil
 }
 
 func (e *Engine) Exists() (bool, error) {

@@ -51,3 +51,14 @@ func (Postgres) RenderValue(v any) string {
 func (p Postgres) SupportsVector() bool {
 	return true
 }
+
+func (p Postgres) ReturningID(fields []string) string {
+	if len(fields) == 0 {
+		return ""
+	}
+	quoted := make([]string, len(fields))
+	for i, field := range fields {
+		quoted[i] = p.QuoteIdentifier(field)
+	}
+	return " RETURNING " + strings.Join(quoted, ", ")
+}

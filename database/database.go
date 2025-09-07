@@ -37,6 +37,8 @@ type Rows interface {
 	Columns() ([]string, error)
 	// Values returns the values for the current row.
 	Values() ([]any, error)
+
+	Err() error
 }
 
 // Result provides an abstract interface for the result of an Exec operation.
