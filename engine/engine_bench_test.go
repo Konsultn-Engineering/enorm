@@ -67,6 +67,22 @@ func createTestGenorm[T any]() *Genorm[T] {
 		panic("Failed to init connector: " + err.Error())
 	}
 
+	// Create table if not exists
+	_, err = conn.Database().Exec(`CREATE TABLE IF NOT EXISTS models (
+			id SERIAL NOT NULL,
+			name text NOT NULL,
+			title text NOT NULL,
+			fax text NOT NULL,
+			web text NOT NULL,
+			age integer NOT NULL,
+			"right" boolean NOT NULL,
+			counter bigint NOT NULL,
+			CONSTRAINT models_pkey PRIMARY KEY (id)
+			) WITH (OIDS=FALSE);`)
+	if err != nil {
+		panic("Failed to create table: " + err.Error())
+	}
+
 	return NewGenorm[T](conn)
 }
 
@@ -75,6 +91,21 @@ func createTestGenorm[T any]() *Genorm[T] {
 func BenchmarkFindOneTyped(b *testing.B) {
 	e := createTestGenorm[Model]()
 	defer e.Close()
+
+	newModel := &Model{
+		Name:    "Some name",
+		Title:   "Some Title",
+		Fax:     "Some Fax",
+		Web:     "Some website",
+		Age:     22,
+		Right:   true,
+		Counter: 1000,
+	}
+
+	_, err := e.Save(newModel)
+	if err != nil {
+		panic(err)
+	}
 
 	u := Model{}
 

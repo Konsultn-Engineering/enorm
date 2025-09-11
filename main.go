@@ -18,7 +18,7 @@ type Model struct {
 	Counter int64
 }
 
-func createTestEngine() (*engine.Engine, database.Database) {
+func createTestEngine() (*engine.Genorm[Model], database.Database) {
 	conn, err := connector.New("postgres", connector.Config{
 		Host:     "localhost",
 		Port:     5432,
@@ -36,19 +36,12 @@ func createTestEngine() (*engine.Engine, database.Database) {
 		panic("Failed to init connector: " + err.Error())
 	}
 
-	return engine.New(conn), conn.Database()
+	return engine.NewGenorm[Model](conn), conn.Database()
 }
 
 func main() {
 	e, _ := createTestEngine()
 
-	newModel := Model{Name: "Test", Title: "Title", Fax: "123", Web: "example.com", Right: true, Age: 30, Counter: 100}
+	var u []*Model
 
-	_, err := e.Save(&newModel)
-
-	if err != nil {
-		panic("Failed to save: " + err.Error())
-	}
-
-	fmt.Println(newModel)
 }
