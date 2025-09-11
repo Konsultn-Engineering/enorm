@@ -33,7 +33,7 @@ type Engine struct {
 	cacheMu          sync.RWMutex
 }
 
-func New(conn connector.Connection) *Engine {
+func NewEngine(conn connector.Connection) *Engine {
 	qc := cache.NewQueryCache()
 	v := visitor.NewSQLVisitor(conn.Dialect(), qc)
 
@@ -74,64 +74,75 @@ func (e *Engine) FindOne(dest any) (string, error) {
 		return "", err
 	}
 
-	query, args, err := e.Builder.Build(meta.TableName, meta.Columns)
+	queryStr, args, err := e.Builder.Build(meta.TableName, meta.Columns)
 	if err != nil {
 		return "", err
 	}
 
-	rows, err := e.db.Query(query, args...)
+	rows, err := e.db.Query(queryStr, args...)
 	if err != nil {
-		return query, err
+		return queryStr, err
 	}
-	defer rows.Close()
+
+	defer func(rows database.Rows) {
+		err = rows.Close()
+		if err != nil {
+
+		}
+	}(rows)
 
 	if !rows.Next() {
-		return query, sql.ErrNoRows
+		return queryStr, sql.ErrNoRows
 	}
 
+	// Use reusable method
+	scanRes := e.getPooledScanResult(len(meta.Columns))
+	defer e.scanPool.Put(scanRes)
+
+	if err = rows.Scan(scanRes.ptrs...); err != nil {
+		return queryStr, err
+	}
+
+	return queryStr, meta.ScanAndSet(dest, meta.Columns, scanRes.vals)
+}
+
+// setupScanPointers prepares scan destinations for a row
+func (e *Engine) setupScanPointers(meta *schema.EntityMeta, structPtr unsafe.Pointer) []any {
+	colCount := len(meta.Columns)
+	ptrs := make([]any, colCount)
+
+	for i, col := range meta.Columns {
+		if fieldMeta := meta.ColumnMap[col]; fieldMeta != nil {
+			ptrs[i] = fieldMeta.DirectPtr(structPtr)
+		} else {
+			ptrs[i] = schema.GetGlobalDummy()
+		}
+	}
+	return ptrs
+}
+
+// getPooledScanResult gets a reusable scan result from pool
+func (e *Engine) getPooledScanResult(colCount int) *struct {
+	vals []any
+	ptrs []any
+} {
 	scanRes := e.scanPool.Get().(*struct {
 		vals []any
 		ptrs []any
 	})
-	defer func() {
-		e.scanPool.Put(scanRes)
-	}()
 
-	// Resize if needed (pointers already set up)
-	colCount := len(meta.Columns)
 	if cap(scanRes.vals) < colCount {
-		// Need to reallocate and rebuild pointers
 		scanRes.vals = make([]any, colCount)
 		scanRes.ptrs = make([]any, colCount)
 		for i := range scanRes.ptrs {
 			scanRes.ptrs[i] = &scanRes.vals[i]
 		}
 	} else {
-		// Just resize, pointers already correct
 		scanRes.vals = scanRes.vals[:colCount]
 		scanRes.ptrs = scanRes.ptrs[:colCount]
 	}
 
-	err = rows.Scan(scanRes.ptrs...)
-	if err != nil {
-		return query, err
-	}
-
-	err = meta.ScanAndSet(dest, meta.Columns, scanRes.vals)
-	if err != nil {
-		return query, err
-	}
-
-	return query, nil
-}
-
-// FindMany optimized for batch operations
-func (e *Engine) FindMany(dest any, ids []any) (string, error) {
-	return "", nil
-}
-
-func (e *Engine) FindAll(dest any) (string, error) {
-	return "", nil
+	return scanRes
 }
 
 func (e *Engine) Find(dest any) (string, error) {
